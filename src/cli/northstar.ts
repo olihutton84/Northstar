@@ -17,7 +17,7 @@
  */
 import { ConsoleLogger, formatSignedUsd, formatUsd, SystemClock } from '../core/index.js';
 import { loadEnv } from '../config/env.js';
-import { NorthstarApp } from '../app.js';
+import { ConfigurationError, NorthstarApp } from '../app.js';
 import { ApiServer } from '../api/server.js';
 import type { ForwardHorizon, TradingMode } from '../domain/types.js';
 import { openDatabase } from '../persistence/db.js';
@@ -41,6 +41,47 @@ function makeApp(mode?: TradingMode): NorthstarApp {
   return new NorthstarApp({ env, clock, logger, ...(mode ? { mode } : {}) });
 }
 
+const GREEN = '\x1b[32m';
+const RED = '\x1b[31m';
+const YELLOW = '\x1b[33m';
+const DIM = '\x1b[2m';
+const RESET = '\x1b[0m';
+
+/**
+ * Positively state which providers are live.
+ *
+ * The old behaviour announced only the FALLBACKS, as warnings, which scroll
+ * past in a long run — so "the bot is quietly on fixtures" looked identical to
+ * "the bot is live" once the first screen had passed. This states the actual
+ * wiring every time, read from the constructed providers rather than from the
+ * environment, so it cannot disagree with reality.
+ *
+ * It never prints a credential, only which provider was selected.
+ */
+function printProviderBanner(app: NorthstarApp): void {
+  const p = app.describeProviders();
+  const tag = (value: string, real: boolean): string =>
+    `${real ? GREEN : YELLOW}${value}${RESET}`;
+
+  out();
+  out(`X:            ${tag(p.x, p.x === 'LIVE')}`);
+  out(`Market Data:  ${tag(p.marketData, p.marketData === 'TIINGO')}`);
+  out(`Broker:       ${tag(p.broker, p.broker.startsWith('ALPACA'))}`);
+  out(`Mode:         ${p.mode}`);
+
+  if (p.forcedFixtures) {
+    out(`${YELLOW}NORTHSTAR_USE_FIXTURES=true — fixtures are forced, any real credentials are ignored.${RESET}`);
+  } else if (!p.allReal) {
+    const missing: string[] = [];
+    if (p.x === 'FIXTURE') missing.push('X_BEARER_TOKEN');
+    if (p.marketData === 'FIXTURE') missing.push('TIINGO_API_KEY');
+    if (!p.broker.startsWith('ALPACA')) missing.push('ALPACA_PAPER_KEY_ID + ALPACA_PAPER_SECRET_KEY');
+    out(`${YELLOW}Running on fixtures. No live data or orders. Set: ${missing.join(', ')}${RESET}`);
+    out(`${DIM}Put them in .env at the repo root; npm scripts load it automatically.${RESET}`);
+  }
+  out();
+}
+
 async function main(): Promise<void> {
   const [command = 'help', ...args] = process.argv.slice(2);
 
@@ -58,7 +99,7 @@ async function main(): Promise<void> {
       out(`Seeded ${strategy.displayName} (${strategy.strategyId} v${strategy.version})`);
       out(`Universe: ${app.universe.active().length} securities`);
       out(`Allocation: ${formatUsd(strategy.allocatedCapitalCents)}`);
-      out(`Mode: ${strategy.mode} · broker: ${app.broker.brokerId} (${app.broker.mode})`);
+      printProviderBanner(app);
       app.close();
       break;
     }
@@ -66,6 +107,7 @@ async function main(): Promise<void> {
     case 'cycle': {
       const app = makeApp(modeArg(args));
       app.seed();
+      printProviderBanner(app);
       const report = await app.runner.runCycle();
       heading('Cycle report');
       out(JSON.stringify(report, null, 2));
@@ -79,6 +121,7 @@ async function main(): Promise<void> {
       const app = makeApp('PAPER');
       app.seed();
       app.setMode('PAPER');
+      printProviderBanner(app);
       out(`Paper loop started: one cycle every ${intervalMinutes} minute(s). Ctrl-C to stop.`);
 
       let cycles = 0;
@@ -114,8 +157,8 @@ async function main(): Promise<void> {
       app.seed();
       const server = new ApiServer({ app, port: env.httpPort, logger, approverId: env.approverId });
       await server.listen();
+      printProviderBanner(app);
       out(`Trading Lab: http://localhost:${env.httpPort}`);
-      out(`Mode: ${app.store.strategies.byId(app.spec.strategyId)?.mode} · broker ${app.broker.brokerId} (${app.broker.mode})`);
       break;
     }
 
@@ -129,7 +172,7 @@ async function main(): Promise<void> {
       heading(`${strategy.displayName} — ${strategy.strategyId} v${strategy.version}`);
       out(`Status        ${survival.status} (${survival.statusRationale})`);
       out(`Run state     ${strategy.runState}${strategy.haltReason ? ` — ${strategy.haltReason}` : ''}`);
-      out(`Mode          ${strategy.mode} · broker ${app.broker.brokerId} (${app.broker.mode})`);
+      printProviderBanner(app);
 
       heading('Capital ledger');
       out(`Starting Capital  ${formatUsd(ledger.startingCapitalCents)}`);
@@ -379,6 +422,17 @@ Environment: see .env.example. Credentials are read from the environment only.`)
 }
 
 main().catch((e) => {
+  // A misconfiguration is the operator's to fix, not a crash to debug: print it
+  // plainly rather than burying it in a stack trace or a JSON log line.
+  if (e instanceof ConfigurationError) {
+    out();
+    out(`${RED}Configuration error${RESET}`);
+    out(e.message);
+    out();
+    out(`${DIM}Fix .env at the repo root, or unset those variables to run on fixtures.${RESET}`);
+    process.exitCode = 1;
+    return;
+  }
   logger.error('command failed', { detail: e instanceof Error ? e.message : String(e) });
   process.exitCode = 1;
 });

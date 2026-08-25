@@ -3,12 +3,16 @@
 ## First run
 
 ```bash
-npm install && npm run build
-cp .env.example .env
-npm run lab -- seed
-npm run lab -- cycle
+npm install
+cp .env.example .env     # fill in the blanks; loaded automatically from here on
+npm run seed
+npm run cycle
 npm run serve            # http://localhost:3737
 ```
+
+`.env` at the repo root is picked up by every `npm run` bot command via Node's
+`--env-file-if-exists`, so a missing `.env` is not an error — you simply get
+fixtures, and the banner says so.
 
 `seed` is idempotent: it creates the strategy, records the immutable version
 spec, persists the universe allowlist and the source registry, and initialises
@@ -22,22 +26,44 @@ records positions, closes them per the exit rules and records outcomes — with 
 manual intervention.
 
 ```bash
-npm run lab -- paper --interval 15      # a cycle every 15 minutes
-npm run lab -- paper --interval 15 --cycles 100
+npm run paper -- --interval 15      # a cycle every 15 minutes
+npm run paper -- --interval 15 --cycles 100
 ```
 
 Or drive it from the dashboard's **Run cycle** button.
 
-Without an X token or Tiingo key, Northstar falls back to the fixture providers
-and logs a warning — it never silently pretends to have data.
+Every run opens with a provider banner stating exactly what is wired up:
+
+```
+X:            LIVE          or   X:            FIXTURE
+Market Data:  TIINGO             Market Data:  FIXTURE
+Broker:       ALPACA PAPER       Broker:       SIMULATED
+Mode:         PAPER              Mode:         PAPER
+```
+
+Green means real, yellow means fixture. It is read from the constructed
+providers, not from the environment, so it cannot disagree with what the bot is
+actually using.
+
+A *half*-configured credential pair is a hard error, not a fallback:
+
+```
+Configuration error
+Alpaca PAPER is partially configured: ALPACA_PAPER_KEY_ID set, but
+ALPACA_PAPER_SECRET_KEY missing. ...
+```
+
+Falling back there would produce a simulator that looks live, which is the worst
+available outcome. Set the missing variable, or unset both to choose fixtures
+deliberately.
 
 ## Checking on it
 
 ```bash
-npm run lab -- status                  # run state, mode, ledger, open positions
-npm run lab -- signals 10              # recent signals, fully explained
-npm run lab -- report 1d               # paper-qualification report
-npm run lab -- trace <proposalId>      # the whole decision chain
+npm run status                     # providers, run state, ledger, open positions
+npm run lab -- signals 10          # recent signals, fully explained
+npm run report -- 1d               # paper-qualification report
+npm run lab -- trace <proposalId>  # the whole decision chain
 ```
 
 Dashboard sections: header status, **Bot Equity vs Benchmark**, live signal feed
@@ -51,6 +77,9 @@ npm run lab -- kill "reason here"                # stop new risk, keep positions
 npm run lab -- kill "reason here" --liquidate    # also close every position
 npm run lab -- resume "fault cleared"
 ```
+
+(`lab` is the single entry point every other script delegates to, so it loads
+`.env` exactly the same way.)
 
 In the UI, **KILL BOT** asks separately whether to liquidate. The default is no.
 
@@ -73,7 +102,7 @@ and resets the failure counters.
 ## Offline qualification
 
 ```bash
-npm run lab -- simulate --cycles 300
+npm run simulate -- --cycles 300
 ```
 
 Runs the real pipeline against a deterministic synthetic X stream and synthetic
@@ -125,6 +154,8 @@ host refuses to start (and vice versa).
 npm run lab -- mode LIVE
 npm run serve
 ```
+
+The banner will then read `Broker: ALPACA LIVE` and `Mode: LIVE`.
 
 The mode flag alone does not switch broker credentials — the process must have
 been started with live trading enabled, and the API returns a 409 explaining

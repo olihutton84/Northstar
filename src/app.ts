@@ -9,7 +9,15 @@
  */
 import type { Clock, Logger } from './core/index.js';
 import { ConsoleLogger, SystemClock } from './core/index.js';
-import { loadAlpacaCredentials, loadEnv, type NorthstarEnv } from './config/env.js';
+import {
+  alpacaPaperCredentialReport,
+  loadAlpacaCredentials,
+  loadEnv,
+  tiingoCredentialReport,
+  xCredentialReport,
+  type CredentialReport,
+  type NorthstarEnv,
+} from './config/env.js';
 import { getSignalConfig, type SignalEngineConfig } from './config/signalConfig.js';
 import {
   latestVersion,
@@ -295,15 +303,28 @@ export class NorthstarApp {
 
   /* --------------------------------------------------- provider builds */
 
+  /**
+   * Fail on a half-configured credential set.
+   *
+   * ABSENT is a decision ("run on fixtures"). PARTIAL is a mistake, and the
+   * worst possible response to it is a fixture provider that looks live. This
+   * throws before any provider is constructed.
+   */
+  private assertNotPartial(report: CredentialReport): void {
+    if (report.state === 'PARTIAL') {
+      throw new ConfigurationError(report.detail);
+    }
+  }
+
   private buildSocial(): SocialDataProvider {
-    if (this.env.useFixtures || !this.env.xBearerToken) {
-      if (!this.env.useFixtures) {
-        this.logger.warn('X_BEARER_TOKEN not set; using the fixture social provider (no live X data).');
-      }
+    const credentials = xCredentialReport(this.env);
+    this.assertNotPartial(credentials);
+
+    if (this.env.useFixtures || credentials.state === 'ABSENT') {
       return new FixtureSocialProvider({ clock: this.clock, registry: this.sourceRegistry });
     }
     return new XProvider({
-      bearerToken: this.env.xBearerToken,
+      bearerToken: this.env.xBearerToken!,
       baseUrl: this.env.xApiBaseUrl,
       clock: this.clock,
       logger: this.logger,
@@ -312,14 +333,14 @@ export class NorthstarApp {
   }
 
   private buildMarketData(): MarketDataProvider {
-    if (this.env.useFixtures || !this.env.tiingoApiKey) {
-      if (!this.env.useFixtures) {
-        this.logger.warn('TIINGO_API_KEY not set; using the fixture market-data provider (no live prices).');
-      }
+    const credentials = tiingoCredentialReport(this.env);
+    this.assertNotPartial(credentials);
+
+    if (this.env.useFixtures || credentials.state === 'ABSENT') {
       return new FixtureMarketDataProvider({ clock: this.clock });
     }
     return new TiingoMarketDataProvider({
-      apiKey: this.env.tiingoApiKey,
+      apiKey: this.env.tiingoApiKey!,
       baseUrl: this.env.tiingoBaseUrl,
       clock: this.clock,
       logger: this.logger,
@@ -331,15 +352,85 @@ export class NorthstarApp {
     if (this.env.useFixtures) {
       return new SimulatedBrokerProvider({ clock: this.clock, marketData: this.marketData, mode });
     }
-    try {
-      const credentials = loadAlpacaCredentials(mode);
-      return new AlpacaBrokerProvider({ credentials, clock: this.clock, logger: this.logger });
-    } catch (e) {
-      if (mode === 'LIVE') throw e;
-      this.logger.warn('Alpaca PAPER credentials unavailable; using the simulated broker.', {
-        detail: e instanceof Error ? e.message : String(e),
+
+    // LIVE credential handling is unchanged: loadAlpacaCredentials enforces the
+    // explicit opt-in and the endpoint check, and any failure propagates.
+    if (mode === 'LIVE') {
+      return new AlpacaBrokerProvider({
+        credentials: loadAlpacaCredentials('LIVE'),
+        clock: this.clock,
+        logger: this.logger,
       });
+    }
+
+    const credentials = alpacaPaperCredentialReport();
+    this.assertNotPartial(credentials);
+
+    if (credentials.state === 'ABSENT') {
       return new SimulatedBrokerProvider({ clock: this.clock, marketData: this.marketData, mode: 'PAPER' });
     }
+
+    // Credentials are complete, so the operator intends real paper trading.
+    // A construction failure from here is a configuration error to surface,
+    // not a reason to quietly hand back a simulator.
+    try {
+      return new AlpacaBrokerProvider({
+        credentials: loadAlpacaCredentials('PAPER'),
+        clock: this.clock,
+        logger: this.logger,
+      });
+    } catch (e) {
+      throw new ConfigurationError(
+        `Alpaca PAPER credentials are set but the broker could not be created: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+    }
   }
+
+  /* ------------------------------------------------------------- banner */
+
+  /**
+   * What is actually wired up, read from the constructed providers rather than
+   * from the environment.
+   *
+   * Deriving this from the live objects is the point: the banner cannot drift
+   * out of agreement with what the bot is really using, however the providers
+   * were selected or injected.
+   */
+  describeProviders(): ProviderSummary {
+    const forced = this.env.useFixtures;
+    const social = this.social.providerId === 'x-api-v2' ? 'LIVE' : 'FIXTURE';
+    const marketData = this.marketData.providerId === 'tiingo' ? 'TIINGO' : 'FIXTURE';
+    const broker = this.broker.brokerId === 'alpaca' ? `ALPACA ${this.broker.mode}` : 'SIMULATED';
+    const mode = this.store.strategies.byId(this.spec.strategyId)?.mode ?? this.mode;
+
+    return {
+      x: social,
+      marketData,
+      broker,
+      mode,
+      allReal: social === 'LIVE' && marketData === 'TIINGO' && this.broker.brokerId === 'alpaca',
+      forcedFixtures: forced,
+    };
+  }
+}
+
+/** A misconfiguration the operator must fix; never a reason to fall back. */
+export class ConfigurationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConfigurationError';
+  }
+}
+
+export interface ProviderSummary {
+  x: 'LIVE' | 'FIXTURE';
+  marketData: 'TIINGO' | 'FIXTURE';
+  broker: string;
+  mode: TradingMode;
+  /** True only when X, Tiingo and Alpaca are all the real thing. */
+  allReal: boolean;
+  /** True when NORTHSTAR_USE_FIXTURES overrode otherwise-valid credentials. */
+  forcedFixtures: boolean;
 }

@@ -23,19 +23,31 @@ X → Ingestion → Filtering → Ticker Resolution → Signal Engine → Risk E
 npm install
 cp .env.example .env          # fill in keys, or leave blank to run on fixtures
 
-npm run build
-npm run lab -- seed           # strategy, universe and the $50 capital ledger
-npm run lab -- cycle          # one full pipeline cycle
+npm run seed                  # strategy, universe and the $50 capital ledger
+npm run cycle                 # one full pipeline cycle
 npm run serve                 # dashboard at http://localhost:3737
+```
+
+Every command loads the repo-root `.env` automatically (Node's native
+`--env-file-if-exists`), and prints which providers are actually wired up:
+
+```
+X:            LIVE
+Market Data:  TIINGO
+Broker:       ALPACA PAPER
+Mode:         PAPER
 ```
 
 No credentials? Set `NORTHSTAR_USE_FIXTURES=true` and everything runs offline
 against recorded fixtures — same code path, no network.
 
 ```bash
-npm run lab -- simulate --cycles 300   # offline paper qualification run
-npm test                               # 130 unit / integration / failure tests
+npm run simulate -- --cycles 300   # offline paper qualification run
+npm test                           # 144 unit / integration / failure tests
 ```
+
+Tests deliberately do **not** load `.env` — they must behave the same on every
+machine, with or without credentials on disk.
 
 ---
 
