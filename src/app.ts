@@ -52,6 +52,9 @@ import { SourceRegistry } from './providers/social/sourceRegistry.js';
 import { XProvider } from './providers/social/XProvider.js';
 import { ApprovalService } from './runtime/ApprovalService.js';
 import { HealthGuard } from './runtime/HealthGuard.js';
+import { ReadinessService } from './runtime/Readiness.js';
+import { ReconciliationService } from './runtime/Reconciliation.js';
+import { SignalAuditService } from './runtime/SignalAudit.js';
 import { StrategyRunner } from './runtime/StrategyRunner.js';
 import { UniverseRegistry } from './universe/UniverseRegistry.js';
 
@@ -100,6 +103,9 @@ export class NorthstarApp {
   readonly analytics: SignalAnalyticsService;
   readonly approvals: ApprovalService;
   readonly runner: StrategyRunner;
+  readonly audit: SignalAuditService;
+  readonly reconciliation: ReconciliationService;
+  readonly readiness: ReadinessService;
 
   constructor(opts: NorthstarAppOptions = {}) {
     this.env = opts.env ?? loadEnv();
@@ -209,6 +215,19 @@ export class NorthstarApp {
       this.logger,
       (securityId) => this.universe.byIdOrNull(securityId)?.companyName ?? securityId,
     );
+
+    this.audit = new SignalAuditService(this.store, this.spec.riskLimits.minResolutionConfidence);
+
+    this.reconciliation = new ReconciliationService(
+      this.store,
+      this.broker,
+      this.ledger,
+      this.clock,
+      this.logger,
+      this.spec.strategyId,
+    );
+
+    this.readiness = new ReadinessService(this, this.clock, this.logger);
 
     this.runner = new StrategyRunner({
       store: this.store,

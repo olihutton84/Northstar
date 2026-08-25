@@ -26,6 +26,7 @@ import type { ExitRuleConfig } from '../config/strategyRegistry.js';
 import type {
   Quote,
   RiskDecision,
+  SignalDisposition,
   Strategy,
   TradeProposal,
   XSignal,
@@ -310,6 +311,10 @@ export class StrategyRunner {
         summary: `Strategy-level risk breach: ${breach.reasons.join('; ')}`,
         payload: { reasons: breach.reasons },
       });
+      for (const signal of signals) {
+        this.recordDisposition(signal, 'STRATEGY_RISK_BREACH', correlationId,
+          `No new risk this cycle: ${breach.reasons.join('; ')}`);
+      }
     } else {
       await this.proposeAndExecute(strategy, signals, quotes, correlationId, report);
     }
@@ -400,14 +405,29 @@ export class StrategyRunner {
     const ranked = [...signals].sort((a, b) => b.score - a.score);
 
     for (const signal of ranked) {
-      if (signal.score < strategy.riskLimits.minSignalScore) continue;
+      if (signal.score <= 0) {
+        this.recordDisposition(signal, 'NOT_LONG', correlationId,
+          `Signal ${signal.score} is not bullish; v1 is long-only, so there is nothing to open.`);
+        continue;
+      }
+      if (signal.score < strategy.riskLimits.minSignalScore) {
+        this.recordDisposition(signal, 'BELOW_SIGNAL_THRESHOLD', correlationId,
+          `Signal ${signal.score} is below the ${strategy.riskLimits.minSignalScore} threshold for this version.`);
+        continue;
+      }
 
       const security = this.d.universe.byIdOrNull(signal.securityId);
-      if (!security) continue;
+      if (!security) {
+        this.recordDisposition(signal, 'SECURITY_UNAVAILABLE', correlationId,
+          `${signal.ticker} is no longer in the Northstar universe.`);
+        continue;
+      }
 
       const quote = quotes.get(security.ticker.toUpperCase()) ?? (await this.safeQuote(security.ticker));
       if (!quote) {
         this.log.info('no quote for signal; skipping proposal', { ticker: security.ticker });
+        this.recordDisposition(signal, 'NO_MARKET_PRICE', correlationId,
+          `No market price available for ${security.ticker}; a trade cannot be sized or risk-checked without one.`);
         continue;
       }
 
@@ -421,7 +441,12 @@ export class StrategyRunner {
         availableCents: this.d.ledger.availableCents(),
         correlationId,
       });
-      if (!proposal) continue;
+      if (!proposal) {
+        this.recordDisposition(signal, 'NOT_SIZEABLE', correlationId,
+          `Position sizing produced nothing tradable: available ${(this.d.ledger.availableCents() / 100).toFixed(2)} USD ` +
+          `against a ${strategy.riskLimits.minOrderCents / 100} USD minimum at ${quote.price.toFixed(2)}.`);
+        continue;
+      }
 
       this.d.store.proposals.save(proposal);
       report.proposalsCreated += 1;
@@ -473,6 +498,8 @@ export class StrategyRunner {
       if (!decision.approved) {
         report.riskRejected += 1;
         this.d.store.proposals.setStatus(proposal.proposalId, 'RISK_REJECTED');
+        this.recordDisposition(signal, 'RISK_REJECTED', correlationId,
+          `Risk rejected the proposal: ${decision.failedChecks.join(', ')}.`, proposal.proposalId);
         continue;
       }
       report.riskApproved += 1;
@@ -487,6 +514,9 @@ export class StrategyRunner {
 
       /* ------------------------------------------------- PAPER vs LIVE */
       if (strategy.mode === 'PAPER') {
+        this.recordDisposition(signal, 'PROPOSED', correlationId,
+          `Proposal ${finalProposal.proposalId} cleared risk and was submitted automatically in PAPER mode.`,
+          finalProposal.proposalId);
         const outcome = await this.d.orderRouter.submitEntry(finalProposal, decision, signal);
         if (outcome.ok) {
           report.ordersSubmitted += 1;
@@ -503,6 +533,9 @@ export class StrategyRunner {
         // via the approval API, which re-runs the router's gate.
         this.d.store.proposals.setStatus(finalProposal.proposalId, 'AWAITING_APPROVAL');
         report.awaitingApproval += 1;
+        this.recordDisposition(signal, 'AWAITING_LIVE_APPROVAL', correlationId,
+          'Proposal cleared risk and is held for explicit human approval; LIVE mode never submits on its own.',
+          finalProposal.proposalId);
         this.d.store.log.append({
           correlationId,
           strategyId: strategy.strategyId,
@@ -513,6 +546,30 @@ export class StrategyRunner {
         });
       }
     }
+  }
+
+  /**
+   * Record what became of a signal.
+   *
+   * Written to the decision log against the SIGNAL id, so the audit view can
+   * answer "why did this not trade?" from stored fact rather than by
+   * re-deriving thresholds after the fact.
+   */
+  private recordDisposition(
+    signal: XSignal,
+    disposition: SignalDisposition,
+    correlationId: string,
+    detail: string,
+    proposalId?: string,
+  ): void {
+    this.d.store.log.append({
+      correlationId,
+      strategyId: signal.strategyId,
+      stage: 'PROPOSAL',
+      subjectId: signal.signalId,
+      summary: `${signal.ticker} signal ${signal.score >= 0 ? '+' : ''}${signal.score}: ${disposition}`,
+      payload: { signalId: signal.signalId, disposition, detail, ...(proposalId ? { proposalId } : {}) },
+    });
   }
 
   /** Quotes for everything the cycle needs to price. */

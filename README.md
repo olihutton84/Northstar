@@ -43,7 +43,8 @@ against recorded fixtures — same code path, no network.
 
 ```bash
 npm run simulate -- --cycles 300   # offline paper qualification run
-npm test                           # 144 unit / integration / failure tests
+npm run readiness                  # PASS/FAIL gates before using real keys
+npm test                           # 209 unit / integration / failure tests
 ```
 
 Tests deliberately do **not** load `.env` — they must behave the same on every
@@ -64,6 +65,11 @@ machine, with or without credentials on disk.
 | `trace <id>` | Reconstruct one decision chain end to end |
 | `simulate --cycles N` | Offline paper simulation over the real pipeline |
 | `report [1h\|1d\|1w\|1m]` | Paper-qualification report |
+| `readiness` | PASS/FAIL gates before the first real-credential run |
+| `reconcile` | Compare the ledger with the broker (read-only) |
+| `replay sample \| export \| run` | Build, freeze and replay a historical dataset |
+| `compare <file> --versions a,b` | Run two strategy versions over one dataset |
+| `audit [signalId]` | Full evidential trail behind one signal |
 | `kill <reason> [--liquidate]` | Engage the kill switch |
 | `resume <note>` | Clear a pause or kill |
 | `mode PAPER\|LIVE` | Set the trading mode |
@@ -102,6 +108,7 @@ Further reading:
 - [`docs/SIGNAL_ENGINE.md`](docs/SIGNAL_ENGINE.md) — the composite, dimension by dimension
 - [`docs/RISK_AND_SAFETY.md`](docs/RISK_AND_SAFETY.md) — risk engine, live gate, fail-safes
 - [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — operating it, including live-mode readiness
+- [`docs/REPLAY.md`](docs/REPLAY.md) — historical replay and strategy-version comparison
 
 ---
 

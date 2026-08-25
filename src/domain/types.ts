@@ -670,6 +670,35 @@ export interface SurvivalMetrics {
   sampleAdequate: boolean;
 }
 
+/* --------------------------------------------------- signal disposition */
+
+/**
+ * What became of a signal.
+ *
+ * Recorded for EVERY signal, including the ones that went nowhere. "Why did
+ * this not trade?" is as important an audit question as "why did this trade?",
+ * and without an explicit record the answer has to be reverse-engineered from
+ * thresholds months later.
+ */
+export type SignalDisposition =
+  | 'PROPOSED'
+  | 'BELOW_SIGNAL_THRESHOLD'
+  | 'NOT_LONG'
+  | 'SECURITY_UNAVAILABLE'
+  | 'NO_MARKET_PRICE'
+  | 'NOT_SIZEABLE'
+  | 'STRATEGY_RISK_BREACH'
+  | 'AWAITING_LIVE_APPROVAL'
+  | 'RISK_REJECTED';
+
+export interface SignalDispositionRecord {
+  signalId: string;
+  disposition: SignalDisposition;
+  detail: string;
+  at: string;
+  proposalId?: string;
+}
+
 /* ---------------------------------------------------------- decision log */
 
 export type DecisionStage =

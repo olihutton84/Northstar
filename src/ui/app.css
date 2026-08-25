@@ -176,3 +176,40 @@ table.grid tbody tr.selected { background: rgba(77,141,255,0.12); }
 .foot-note { max-width: 620px; text-align: right; }
 
 .empty { color: var(--text-faint); font-size: 12px; padding: 14px 4px; }
+
+
+/* ------------------------------------------------------------- health */
+
+.health-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px;
+}
+.health-cell {
+  background: var(--bg); border: 1px solid var(--border);
+  border-left: 3px solid var(--neutral); border-radius: 8px; padding: 9px 11px;
+}
+.health-cell.ok   { border-left-color: var(--good); }
+.health-cell.warn { border-left-color: var(--warn); }
+.health-cell.bad  { border-left-color: var(--bad); }
+.health-cell .k { color: var(--text-faint); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
+.health-cell .v { font-family: var(--mono); font-size: 14px; margin-top: 3px; }
+.health-cell .s { color: var(--text-faint); font-size: 10px; margin-top: 2px; }
+
+.audit-section { margin-bottom: 18px; }
+.audit-section h4 {
+  margin: 0 0 8px; font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.07em; color: var(--text-dim);
+}
+.audit-source {
+  border: 1px solid var(--border); border-radius: 8px; padding: 10px;
+  margin-bottom: 8px; background: var(--bg); font-size: 12px;
+}
+.audit-source.rejected { opacity: 0.55; border-style: dashed; }
+.audit-source .meta { color: var(--text-faint); font-size: 11px; margin-bottom: 4px; }
+.audit-verdict {
+  padding: 10px 12px; border-radius: 8px; margin-bottom: 14px;
+  background: rgba(77,141,255,0.08); border: 1px solid rgba(77,141,255,0.3);
+}
+.audit-verdict.traded { background: rgba(47,191,113,0.08); border-color: rgba(47,191,113,0.35); }
+.audit-verdict.blocked { background: rgba(232,163,61,0.08); border-color: rgba(232,163,61,0.35); }
+.audit-verdict ol { margin: 8px 0 0; padding-left: 20px; }
+.audit-verdict li { margin-bottom: 3px; }

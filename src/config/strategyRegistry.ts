@@ -131,6 +131,53 @@ export function publishStrategyVersion(spec: StrategyVersionSpec): void {
   VERSIONS.set(key, spec);
 }
 
+/**
+ * Publish a candidate version derived from an existing one.
+ *
+ * The base is deep-cloned, so registering a candidate cannot mutate the version
+ * it came from — which matters because a comparison is only meaningful if the
+ * baseline stays exactly as it was when the earlier results were recorded.
+ * `publishStrategyVersion` then refuses a duplicate id, so a published version
+ * can never be quietly redefined.
+ */
+export function deriveStrategyVersion(
+  base: StrategyVersionSpec,
+  changes: {
+    version: string;
+    publishedAt: string;
+    changelog: string;
+    signalConfigId?: string;
+    allocatedCapitalCents?: number;
+    benchmarkTicker?: string;
+    universeSources?: UniverseSource[];
+    riskLimits?: Partial<RiskLimits>;
+    exitRules?: Partial<ExitRuleConfig>;
+    description?: string;
+  },
+): StrategyVersionSpec {
+  if (changes.version === base.version) {
+    throw new Error(`Derived version must differ from the base version ${base.version}; versions are immutable.`);
+  }
+
+  const clone = structuredClone(base);
+  const spec: StrategyVersionSpec = {
+    ...clone,
+    version: changes.version,
+    publishedAt: changes.publishedAt,
+    changelog: changes.changelog,
+    signalConfigId: changes.signalConfigId ?? clone.signalConfigId,
+    allocatedCapitalCents: changes.allocatedCapitalCents ?? clone.allocatedCapitalCents,
+    benchmarkTicker: changes.benchmarkTicker ?? clone.benchmarkTicker,
+    universeSources: changes.universeSources ?? clone.universeSources,
+    riskLimits: { ...clone.riskLimits, ...(changes.riskLimits ?? {}) },
+    exitRules: { ...clone.exitRules, ...(changes.exitRules ?? {}) },
+    description: changes.description ?? clone.description,
+  };
+
+  publishStrategyVersion(spec);
+  return spec;
+}
+
 export function listStrategyVersions(strategyId?: string): StrategyVersionSpec[] {
   const all = [...VERSIONS.values()];
   return strategyId ? all.filter((v) => v.strategyId === strategyId) : all;

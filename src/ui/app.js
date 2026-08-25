@@ -7,6 +7,7 @@
 
 const $ = (sel) => document.querySelector(sel);
 let state = null;
+let health = null;
 let selectedSignalId = null;
 
 /* ------------------------------------------------------------- helpers */
@@ -59,7 +60,10 @@ function bandClass(band) {
 
 async function load() {
   try {
-    state = await api('/api/dashboard');
+    [state, health] = await Promise.all([
+      api('/api/dashboard'),
+      api('/api/observability').catch(() => null),
+    ]);
     render();
   } catch (e) {
     toast(`Failed to load dashboard: ${e.message}`, 'bad');
@@ -68,6 +72,7 @@ async function load() {
 
 function render() {
   renderHeader();
+  renderHealth();
   renderStats();
   renderChart();
   renderApprovals();
@@ -79,6 +84,96 @@ function render() {
   renderSources();
   renderRisk();
   $('#generated-at').textContent = `Generated ${time(state.generatedAt)}`;
+}
+
+/* ------------------------------------------------------------- health */
+
+function ago(minutes) {
+  if (minutes === null || minutes === undefined) return 'never';
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${Math.round(minutes)}m ago`;
+  if (minutes < 1440) return `${(minutes / 60).toFixed(1)}h ago`;
+  return `${(minutes / 1440).toFixed(1)}d ago`;
+}
+
+function cell(label, value, tone, sub) {
+  return `<div class="health-cell ${tone}">
+    <div class="k">${esc(label)}</div>
+    <div class="v">${esc(value)}</div>
+    ${sub ? `<div class="s">${esc(sub)}</div>` : ''}
+  </div>`;
+}
+
+/**
+ * Staleness tone. A provider that has never succeeded IS a problem once the
+ * process has been up long enough to have tried; before that it is just early.
+ */
+function staleTone(minutes, uptimeMinutes, warnAfter, badAfter) {
+  if (minutes === null) return uptimeMinutes > warnAfter ? 'bad' : '';
+  if (minutes >= badAfter) return 'bad';
+  if (minutes >= warnAfter) return 'warn';
+  return 'ok';
+}
+
+function renderHealth() {
+  const body = $('#health-body');
+  if (!health) {
+    body.innerHTML = '<div class="empty">Observability endpoint unavailable.</div>';
+    return;
+  }
+
+  const p = health.providers;
+  const pr = health.process;
+  const up = pr.uptimeMinutes;
+
+  $('#health-note').textContent =
+    `Process up ${ago(up)} · ${p.allReal ? 'all providers live' : 'fixtures in use'}` +
+    (p.forcedFixtures ? ' (forced by NORTHSTAR_USE_FIXTURES)' : '');
+
+  const killTone = health.killSwitch.engaged ? 'bad' : 'ok';
+  const runTone = health.strategy.runState === 'RUNNING' ? 'ok'
+    : health.strategy.runState === 'KILLED' ? 'bad' : 'warn';
+
+  body.innerHTML = `<div class="health-grid">
+    ${cell('X provider', p.x, p.x === 'LIVE' ? 'ok' : 'warn', p.ids.social)}
+    ${cell('Market data', p.marketData, p.marketData === 'TIINGO' ? 'ok' : 'warn', p.ids.marketData)}
+    ${cell('Broker', p.broker, p.broker.startsWith('ALPACA') ? 'ok' : 'warn', p.ids.broker)}
+    ${cell('Mode', p.mode, p.mode === 'LIVE' ? 'warn' : 'ok', `strategy ${health.strategy.version}`)}
+
+    ${cell('Last X ingest', ago(pr.staleness.social),
+      staleTone(pr.staleness.social, up, 60, 180),
+      pr.consecutiveFailures.social ? `${pr.consecutiveFailures.social} consecutive failures` : 'since process start')}
+    ${cell('Last price refresh', ago(pr.staleness.marketData),
+      staleTone(pr.staleness.marketData, up, 60, 180),
+      pr.consecutiveFailures.marketData ? `${pr.consecutiveFailures.marketData} consecutive failures` : 'since process start')}
+    ${cell('Last broker success', ago(pr.staleness.broker),
+      staleTone(pr.staleness.broker, up, 120, 360),
+      pr.consecutiveFailures.broker ? `${pr.consecutiveFailures.broker} consecutive failures` : 'since process start')}
+    ${cell('Stored events (24h)', String(health.stored.storedEventsLast24h), '',
+      health.stored.lastStoredEventAt ? `last ${time(health.stored.lastStoredEventAt)}` : 'none stored')}
+
+    ${cell('Ledger equity', health.ledger.equity, health.ledger.integrityOk ? 'ok' : 'bad',
+      health.ledger.integrityOk ? 'reconciles with entry log' : 'LEDGER MISMATCH')}
+    ${cell('Reserved capital', health.ledger.reserved,
+      health.ledger.reservedCents > health.ledger.equityCents ? 'bad' : '', 'committed to unfilled orders')}
+    ${cell('Open orders', String(health.exposure.openOrders), '',
+      health.exposure.pendingApprovals ? `${health.exposure.pendingApprovals} awaiting approval` : 'none pending approval')}
+    ${cell('Open positions', `${health.exposure.openPositions} / ${health.exposure.maxPositions}`, '', 'concurrent limit')}
+
+    ${cell('Risk state', health.risk.breached ? 'BREACHED' : 'WITHIN LIMITS',
+      health.risk.breached ? 'bad' : 'ok',
+      `daily ${health.risk.dailyLossPct.toFixed(2)}%/${health.risk.maxDailyLossPct}% · DD ${health.risk.drawdownPct.toFixed(2)}%/${health.risk.maxDrawdownPct}%`)}
+    ${cell('Strategy state', health.strategy.runState, runTone, health.strategy.status)}
+    ${cell('Kill switch', health.killSwitch.engaged ? 'ENGAGED' : 'ARMED', killTone,
+      health.killSwitch.engaged
+        ? (health.killSwitch.liquidateOnKill ? 'liquidation selected' : 'positions untouched')
+        : 'ready')}
+    ${cell('Open incidents', String(health.killSwitch.openIncidents.length),
+      health.killSwitch.openIncidents.length ? 'bad' : 'ok',
+      health.killSwitch.openIncidents[0]?.fault ?? 'none')}
+  </div>
+  ${health.risk.breached ? `<div class="banner" style="margin-top:12px">Risk breach: ${esc(health.risk.breachReasons.join('; '))}</div>` : ''}
+  ${!health.ledger.integrityOk ? `<div class="banner" style="margin-top:12px">${esc(health.ledger.integrityDetail)}</div>` : ''}`;
 }
 
 /* ------------------------------------------------------------- header */
@@ -357,6 +452,7 @@ function renderSignals() {
   const selected = rows.find((s) => s.signalId === selectedSignalId) ?? rows[0];
   selectedSignalId = selected.signalId;
   renderSignalDetail(selected);
+  $('#btn-audit').disabled = false;
 }
 
 function renderSignalDetail(s) {
@@ -380,6 +476,121 @@ function renderSignalDetail(s) {
     <ul>${s.topContributions.map((c) => `<li>${esc(c.explanation)}</li>`).join('')}</ul>
     ${s.supporting.length ? `<h4>Supporting evidence</h4><ul>${s.supporting.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
     ${s.contradictory.length ? `<h4>Contradictory evidence</h4><ul class="against">${s.contradictory.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}`;
+}
+
+/* --------------------------------------------------------- audit view */
+
+const DISPOSITION_LABEL = {
+  PROPOSED: 'Became a trade proposal',
+  AWAITING_LIVE_APPROVAL: 'Held for human approval (LIVE)',
+  RISK_REJECTED: 'Blocked by the risk engine',
+  BELOW_SIGNAL_THRESHOLD: 'Score below the trading threshold',
+  NOT_LONG: 'Not bullish — v1 is long-only',
+  SECURITY_UNAVAILABLE: 'Security left the permitted universe',
+  NO_MARKET_PRICE: 'No market price available',
+  NOT_SIZEABLE: 'Could not be sized into a tradable position',
+  STRATEGY_RISK_BREACH: 'Strategy-level risk limit was breached',
+  NO_RECORD: 'No disposition recorded',
+};
+
+async function openAudit(signalId) {
+  try {
+    const a = await api(`/api/signals/${signalId}/audit`);
+    const s = a.signal;
+    const traded = a.outcome.disposition === 'PROPOSED';
+    const blocked = ['RISK_REJECTED', 'STRATEGY_RISK_BREACH', 'SECURITY_UNAVAILABLE'].includes(a.outcome.disposition);
+
+    $('#modal-title').textContent = `Audit — ${s.ticker} ${s.score > 0 ? '+' : ''}${s.score} (${s.band})`;
+    $('#modal-body').innerHTML = `
+      <div class="audit-verdict ${traded ? 'traded' : blocked ? 'blocked' : ''}">
+        <strong>${esc(DISPOSITION_LABEL[a.outcome.disposition] ?? a.outcome.disposition)}</strong>
+        <div class="stat-sub" style="margin-top:4px">${esc(a.outcome.detail)}</div>
+        <ol>${a.outcome.narrative.map((n) => `<li>${esc(n)}</li>`).join('')}</ol>
+      </div>
+
+      <div class="audit-section">
+        <h4>Score composition</h4>
+        <div class="table-scroll"><table class="grid">
+          <thead><tr><th>Dimension</th><th class="num">Value</th><th class="num">Points</th><th>Why</th></tr></thead>
+          <tbody>${a.components.map((c) => `<tr>
+            <td>${esc(c.name)}${c.directional ? ' <span class="chip">directional</span>' : ''}</td>
+            <td class="num">${c.value}</td>
+            <td class="num ${signClass(c.contributionPoints)}">${c.contributionPoints > 0 ? '+' : ''}${c.contributionPoints}</td>
+            <td>${esc(c.explanation)}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>
+        <div class="stat-sub" style="margin-top:6px">
+          Final score ${s.score} · uncertainty ${(a.uncertainty * 100).toFixed(0)}%
+        </div>
+      </div>
+
+      <div class="audit-section">
+        <h4>Entity resolution</h4>
+        <div class="kv">
+          <div><div class="k">Minimum confidence</div><div class="v ${a.resolution.passesThreshold ? 'pos' : 'neg'}">${(a.resolution.minConfidence * 100).toFixed(0)}%</div></div>
+          <div><div class="k">Tradable threshold</div><div class="v">${(a.resolution.tradableThreshold * 100).toFixed(0)}%</div></div>
+          <div><div class="k">Verdict</div><div class="v ${a.resolution.passesThreshold ? 'pos' : 'neg'}">${a.resolution.passesThreshold ? 'USABLE' : 'TOO AMBIGUOUS'}</div></div>
+        </div>
+      </div>
+
+      <div class="audit-section">
+        <h4>Source posts (${a.sources.length})</h4>
+        ${a.sources.map((src) => `
+          <div class="audit-source ${src.filterVerdict === 'REJECT' ? 'rejected' : ''}">
+            <div class="meta">
+              <strong>@${esc(src.handle)}</strong> · <span class="chip">${esc(src.sourceTier.replace('_', ' '))}</span>
+              ${esc(src.sourceClass.replace(/_/g, ' ').toLowerCase())} ·
+              posted ${esc(time(src.postedAt))} · seen ${esc(time(src.capturedAt))} ·
+              weight ${src.weight} ·
+              sentiment ${src.sentiment > 0 ? '+' : ''}${src.sentiment} ·
+              ${esc(src.eventType.replace(/_/g, ' ').toLowerCase())}
+              ${src.filterVerdict && src.filterVerdict !== 'ACCEPT' ? ` · <span class="neg">${esc(src.filterVerdict)}: ${esc(src.filterReasons.join(', '))}</span>` : ''}
+            </div>
+            <div>${esc(src.text)}</div>
+            <div class="meta" style="margin-top:4px">
+              ${src.resolution
+                ? `resolved via ${esc(src.resolution.method)} @ ${(src.resolution.confidence * 100).toFixed(0)}% on "${esc(src.resolution.matchedText)}"${src.resolution.competingSecurityIds.length ? ` · competing: ${esc(src.resolution.competingSecurityIds.join(', '))}` : ''}`
+                : 'no resolution recorded for this security'}
+              · ♥ ${src.engagement.likes} ⇄ ${src.engagement.reposts}
+              · <a href="${esc(src.url)}" target="_blank" rel="noopener">post</a>
+            </div>
+          </div>`).join('')}
+      </div>
+
+      ${a.priceConfirmation ? `<div class="audit-section">
+        <h4>Price confirmation</h4>
+        <div class="kv">
+          <div><div class="k">Last price</div><div class="v">${a.priceConfirmation.lastPrice.toFixed(2)}</div></div>
+          <div><div class="k">Momentum</div><div class="v ${signClass(a.priceConfirmation.momentumPct)}">${pct(a.priceConfirmation.momentumPct)}</div></div>
+          <div><div class="k">Abnormal move</div><div class="v">${a.priceConfirmation.abnormalMoveZ.toFixed(2)}σ</div></div>
+          <div><div class="k">Volume ratio</div><div class="v">${a.priceConfirmation.abnormalVolumeRatio === null ? 'n/a' : `${a.priceConfirmation.abnormalVolumeRatio.toFixed(2)}x`}</div></div>
+          <div><div class="k">vs benchmark</div><div class="v ${signClass(a.priceConfirmation.marketRelativePct)}">${pct(a.priceConfirmation.marketRelativePct)}</div></div>
+          <div><div class="k">Data age</div><div class="v ${a.priceConfirmation.stale ? 'neg' : ''}">${a.priceConfirmation.dataAgeMinutes.toFixed(0)}m${a.priceConfirmation.stale ? ' STALE' : ''}</div></div>
+        </div>
+      </div>` : '<div class="audit-section"><h4>Price confirmation</h4><div class="empty">No market data was available; the price adjustment was withheld and uncertainty raised.</div></div>'}
+
+      ${a.contradictoryEvidence.length ? `<div class="audit-section">
+        <h4>Evidence against</h4>
+        <div class="detail against"><ul>${a.contradictoryEvidence.map((c) => `<li>${esc(c)}</li>`).join('')}</ul></div>
+      </div>` : ''}
+
+      ${a.forwardReturns.some((f) => f.forwardReturnPct !== null) ? `<div class="audit-section">
+        <h4>Forward returns</h4>
+        <div class="table-scroll"><table class="grid">
+          <thead><tr><th>Horizon</th><th class="num">Return</th><th class="num">Excess</th><th>Hit</th></tr></thead>
+          <tbody>${a.forwardReturns.map((f) => `<tr>
+            <td>${esc(f.horizon)}</td>
+            <td class="num ${signClass(f.forwardReturnPct)}">${pct(f.forwardReturnPct)}</td>
+            <td class="num ${signClass(f.excessReturnPct)}">${pct(f.excessReturnPct)}</td>
+            <td>${f.hit === null ? '—' : f.hit ? '✅' : '❌'}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>
+      </div>` : ''}`;
+
+    $('#modal').classList.remove('hidden');
+  } catch (e) {
+    toast(`Could not load audit: ${e.message}`, 'bad');
+  }
 }
 
 /* ---------------------------------------------------------- proposals */
@@ -534,6 +745,7 @@ function renderRisk() {
 /* ------------------------------------------------------------ actions */
 
 $('#btn-refresh').addEventListener('click', load);
+$('#btn-audit').addEventListener('click', () => { if (selectedSignalId) openAudit(selectedSignalId); });
 
 $('#btn-cycle').addEventListener('click', async () => {
   const btn = $('#btn-cycle');

@@ -43,6 +43,17 @@ export interface HealthState {
   haltReason: string | null;
   openIncidents: HealthIncident[];
   failureCounts: Record<ProviderKey, number>;
+  /**
+   * When each provider last succeeded, since this process started.
+   *
+   * In-process by design: it answers "is the thing running right now still
+   * talking to its vendors", which is what an operator watching a live paper
+   * run needs. Facts that must survive a restart live in the database.
+   */
+  lastSuccessAt: Record<ProviderKey, string | null>;
+  lastFailureAt: Record<ProviderKey, string | null>;
+  lastFailureDetail: Record<ProviderKey, string | null>;
+  startedAt: string;
   /** Whether kill-switch liquidation was explicitly confirmed. */
   liquidateOnKill: boolean;
 }
@@ -50,6 +61,10 @@ export interface HealthState {
 export class HealthGuard {
   private readonly log: Logger;
   private readonly failures: Record<ProviderKey, number> = { social: 0, broker: 0, marketData: 0 };
+  private readonly lastSuccess: Record<ProviderKey, string | null> = { social: null, broker: null, marketData: null };
+  private readonly lastFailure: Record<ProviderKey, string | null> = { social: null, broker: null, marketData: null };
+  private readonly lastFailureDetail: Record<ProviderKey, string | null> = { social: null, broker: null, marketData: null };
+  private readonly startedAt: string;
   private liquidateOnKill = false;
 
   constructor(
@@ -60,6 +75,7 @@ export class HealthGuard {
     private readonly config: CircuitBreakerConfig = DEFAULT_BREAKER_CONFIG,
   ) {
     this.log = logger.child('health');
+    this.startedAt = clock.nowIso();
   }
 
   /* ------------------------------------------------------- kill switch */
@@ -163,6 +179,7 @@ export class HealthGuard {
       this.log.info('provider recovered', { provider, priorFailures: this.failures[provider] });
     }
     this.failures[provider] = 0;
+    this.lastSuccess[provider] = this.clock.nowIso();
   }
 
   /**
@@ -171,6 +188,8 @@ export class HealthGuard {
    */
   recordFailure(provider: ProviderKey, detail: string, kind?: string): boolean {
     this.failures[provider] += 1;
+    this.lastFailure[provider] = this.clock.nowIso();
+    this.lastFailureDetail[provider] = detail;
     const count = this.failures[provider];
 
     // Authentication failure is never a transient blip: pause immediately.
@@ -224,6 +243,10 @@ export class HealthGuard {
       haltReason: strategy.haltReason,
       openIncidents: this.store.incidents.open(this.strategyId),
       failureCounts: { ...this.failures },
+      lastSuccessAt: { ...this.lastSuccess },
+      lastFailureAt: { ...this.lastFailure },
+      lastFailureDetail: { ...this.lastFailureDetail },
+      startedAt: this.startedAt,
       liquidateOnKill: this.liquidateOnKill,
     };
   }
@@ -233,6 +256,15 @@ export class HealthGuard {
     return this.strategy().runState === 'RUNNING';
   }
 
+  /**
+   * Whether the kill switch should also close positions.
+   *
+   * Deliberately in-memory: a liquidation instruction does NOT survive a
+   * restart. Coming back up and discovering that the process has begun selling
+   * on an intent given before the restart is worse than requiring the operator
+   * to say so again against the state they can actually see. The KILLED run
+   * state itself IS persisted, so a restart still refuses to trade.
+   */
   get shouldLiquidate(): boolean {
     return this.liquidateOnKill && this.strategy().runState === 'KILLED';
   }

@@ -22,6 +22,12 @@ import { ApiServer } from '../api/server.js';
 import type { ForwardHorizon, TradingMode } from '../domain/types.js';
 import { openDatabase } from '../persistence/db.js';
 import { runSimulation, summarise } from './simulation.js';
+import { compareStrategyVersions, renderComparison } from '../replay/compare.js';
+import { datasetStats, exportDatasetFromStore, readDataset, writeDataset } from '../replay/dataset.js';
+import { runReplay, summariseReplay, type ReplayResult } from '../replay/ReplayEngine.js';
+import { buildSampleDataset } from '../replay/sampleDataset.js';
+import { getStrategyVersion, latestVersion, listStrategyVersions, X_STRATEGY_ID } from '../config/strategyRegistry.js';
+import { randomId } from '../core/index.js';
 
 const env = loadEnv();
 const logger = new ConsoleLogger(env.logLevel as 'info', 'cli');
@@ -29,6 +35,17 @@ const clock = new SystemClock();
 
 function out(line = ''): void {
   process.stdout.write(`${line}\n`);
+}
+
+/** Alias used where a local named `out` would shadow the helper. */
+const out_ = out;
+
+function listStrategyVersionsSafe(): string[] {
+  try {
+    return listStrategyVersions(X_STRATEGY_ID).map((v) => v.version);
+  } catch {
+    return [];
+  }
 }
 
 function heading(title: string): void {
@@ -212,6 +229,203 @@ async function main(): Promise<void> {
       break;
     }
 
+    case 'replay': {
+      const sub = args[0];
+
+      if (sub === 'sample') {
+        const out = flag(args, '--out') ?? './data/replay/sample.json';
+        const dataset = buildSampleDataset({
+          seed: Number(flag(args, '--seed') ?? 424242),
+          hours: Number(flag(args, '--hours') ?? 24),
+        });
+        writeDataset(out, dataset);
+        const stats = datasetStats(dataset);
+        out_(`Wrote sample dataset to ${out}`);
+        out_(`  ${stats.events} events · ${stats.authors} authors · ${stats.bars} bars · ` +
+             `${stats.tickers.length} tickers · ${stats.windowHours}h window`);
+        out_('  Prices are synthetic: this validates the machinery, not the edge.');
+        break;
+      }
+
+      if (sub === 'export') {
+        const app = makeApp();
+        app.seed();
+        const days = Number(flag(args, '--days') ?? 7);
+        const to = clock.nowIso();
+        const from = new Date(clock.nowMs() - days * 86_400_000).toISOString();
+        const outPath = flag(args, '--out') ?? `./data/replay/export-${to.slice(0, 10)}.json`;
+        const dataset = exportDatasetFromStore(app.store, {
+          from,
+          to,
+          benchmarkTicker: app.spec.benchmarkTicker,
+          datasetId: randomId('ds'),
+          createdAt: to,
+        });
+        writeDataset(outPath, dataset);
+        const stats = datasetStats(dataset);
+        out_(`Exported ${stats.events} events and ${stats.bars} bars to ${outPath}`);
+        app.close();
+        break;
+      }
+
+      if (sub === 'run') {
+        const file = args[1];
+        if (!file) { out_('Usage: northstar replay run <dataset.json> [--version 1.0.0] [--step 30]'); break; }
+        const dataset = readDataset(file);
+        const version = flag(args, '--version');
+        const spec = version ? getStrategyVersion(X_STRATEGY_ID, version) : latestVersion(X_STRATEGY_ID);
+
+        out_(`Replaying ${dataset.datasetId} against ${spec.strategyId}@${spec.version}...`);
+        const result = await runReplay({
+          dataset,
+          spec,
+          stepMinutes: Number(flag(args, '--step') ?? 30),
+        });
+        printReplayReport(result);
+        break;
+      }
+
+      out_('Usage: northstar replay <sample|export|run> ...');
+      break;
+    }
+
+    case 'compare': {
+      const file = args[0];
+      if (!file) { out_('Usage: northstar compare <dataset.json> --versions 1.0.0,1.1.0'); break; }
+      const versions = (flag(args, '--versions') ?? '').split(',').map((v) => v.trim()).filter(Boolean);
+      if (versions.length < 2) {
+        out_('Give at least two versions: --versions 1.0.0,1.1.0');
+        out_(`Registered: ${listStrategyVersionsSafe().join(', ')}`);
+        break;
+      }
+      const dataset = readDataset(file);
+      const specs = versions.map((v) => getStrategyVersion(X_STRATEGY_ID, v));
+      out_(`Comparing ${versions.join(' vs ')} on ${dataset.datasetId}...`);
+      out_();
+      const comparison = await compareStrategyVersions({
+        dataset,
+        specs,
+        stepMinutes: Number(flag(args, '--step') ?? 30),
+      });
+      out_(renderComparison(comparison));
+      break;
+    }
+
+    case 'reconcile': {
+      const app = makeApp(modeArg(args));
+      app.seed();
+      printProviderBanner(app);
+      const report = await app.reconciliation.reconcile();
+
+      heading('RECONCILIATION (read-only)');
+      out_(`Broker        ${report.brokerId} (${report.brokerMode})${report.reachedBroker ? '' : ' — UNREACHABLE'}`);
+      out_(`Checked       ${report.checked.ledgerEntries} ledger entries · ${report.checked.openOrders} open orders · ` +
+           `${report.checked.openPositions} positions vs ${report.checked.brokerOpenOrders} broker orders / ` +
+           `${report.checked.brokerPositions} broker positions`);
+      out_(`Ledger        cash ${formatUsd(report.ledger.cashCents)} · reserved ${formatUsd(report.ledger.reservedCents)} · ` +
+           `positions ${formatUsd(report.ledger.positionsValueCents)} · equity ${formatUsd(report.ledger.equityCents)}`);
+      out_(`Integrity     ${report.ledger.integrityOk ? 'OK' : 'MISMATCH'}`);
+
+      if (report.discrepancies.length === 0) {
+        out_();
+        out_(`${GREEN}No discrepancies. Nothing was modified.${RESET}`);
+      } else {
+        heading(`DISCREPANCIES (${report.discrepancies.length})`);
+        for (const d of report.discrepancies) {
+          const colour = d.severity === 'CRITICAL' ? RED : d.severity === 'WARNING' ? YELLOW : DIM;
+          out_(`${colour}[${d.severity}]${RESET} ${d.area} · ${d.subject}`);
+          out_(`   ${d.detail}`);
+          out_(`   northstar: ${d.northstar}`);
+          out_(`   broker:    ${d.broker}`);
+        }
+        out_();
+        out_(`${DIM}Nothing was modified. Reconciliation is read-only by design: when the two sides disagree,${RESET}`);
+        out_(`${DIM}an automated repair has even odds of destroying the evidence needed to work out which is right.${RESET}`);
+      }
+      process.exitCode = report.ok ? 0 : 1;
+      app.close();
+      break;
+    }
+
+    case 'readiness': {
+      const app = makeApp(modeArg(args));
+      app.seed();
+      const report = await app.readiness.run();
+
+      heading('FIRST-LIVE-DATA READINESS');
+      out_(`Strategy   ${report.strategyId} v${report.strategyVersion} · mode ${report.mode}`);
+      out_(`Generated  ${report.at}`);
+      out_();
+
+      for (const check of report.checks) {
+        const colour = check.status === 'PASS' ? GREEN
+          : check.status === 'FAIL' ? RED
+          : check.status === 'WARN' ? YELLOW : DIM;
+        out_(`${colour}${check.status.padEnd(4)}${RESET}  ${check.label.padEnd(30)} ${check.detail}`);
+        if (check.remedy) out_(`        ${DIM}-> ${check.remedy}${RESET}`);
+      }
+
+      out_();
+      const banner = report.overall === 'PASS' ? `${GREEN}READY${RESET}` : `${RED}NOT READY${RESET}`;
+      out_(`${banner}  ${report.passed} passed · ${report.failed} failed · ${report.warned} warning(s) · ${report.skipped} skipped`);
+      out_(`${DIM}No orders were submitted by this command.${RESET}`);
+      if (!report.liveDataConfigured) {
+        out_(`${YELLOW}Note: not all providers are live, so the reachability checks that matter most were skipped.${RESET}`);
+      }
+      process.exitCode = report.overall === 'PASS' ? 0 : 1;
+      app.close();
+      break;
+    }
+
+    case 'audit': {
+      const signalId = args[0];
+      const app = makeApp();
+      const target = signalId ?? app.store.signals.recent(1)[0]?.signalId;
+      if (!target) { out_('No signals stored yet. Run `npm run cycle` first.'); app.close(); break; }
+
+      const view = app.audit.audit(target);
+      if (!view) { out_(`Signal ${target} not found.`); app.close(); break; }
+
+      const s = view.signal;
+      heading(`AUDIT ${s.ticker} — ${s.band} ${s.score >= 0 ? '+' : ''}${s.score}`);
+      out_(`Signal     ${s.signalId}`);
+      out_(`Generated  ${s.generatedAt} · config ${s.signalConfigId} · strategy v${s.strategyVersion}`);
+      out_();
+      out_(`${GREEN}Outcome: ${view.outcome.disposition}${RESET}`);
+      out_(`  ${view.outcome.detail}`);
+      for (const line of view.outcome.narrative) out_(`  - ${line}`);
+
+      heading('SCORE COMPOSITION');
+      for (const c of view.components) {
+        out_(`  ${c.name.padEnd(26)} ${String(c.value).padStart(5)}  ` +
+             `${(c.contributionPoints >= 0 ? '+' : '') + c.contributionPoints.toFixed(1)} pts`);
+      }
+      out_(`  ${'uncertainty'.padEnd(26)} ${(view.uncertainty * 100).toFixed(0)}%`);
+
+      heading(`ENTITY RESOLUTION (min ${(view.resolution.minConfidence * 100).toFixed(0)}%, ` +
+              `threshold ${(view.resolution.tradableThreshold * 100).toFixed(0)}%)`);
+      out_(`  ${view.resolution.passesThreshold ? 'USABLE' : 'TOO AMBIGUOUS TO TRADE'}`);
+      for (const r of view.resolution.perEvent) {
+        out_(`  ${r.ticker} via ${r.method} @ ${(r.confidence * 100).toFixed(0)}% on "${r.matchedText}"`);
+      }
+
+      heading(`SOURCE POSTS (${view.sources.length})`);
+      for (const src of view.sources) {
+        out_(`  @${src.handle} [${src.sourceTier}] weight ${src.weight} · sentiment ${src.sentiment >= 0 ? '+' : ''}${src.sentiment} · ${src.eventType}`);
+        out_(`     ${src.text.slice(0, 150)}${src.text.length > 150 ? '...' : ''}`);
+        if (src.filterVerdict && src.filterVerdict !== 'ACCEPT') {
+          out_(`     filter: ${src.filterVerdict} (${src.filterReasons.join(', ')})`);
+        }
+      }
+
+      if (view.contradictoryEvidence.length > 0) {
+        heading('EVIDENCE AGAINST');
+        for (const c of view.contradictoryEvidence) out_(`  - ${c}`);
+      }
+      app.close();
+      break;
+    }
+
     case 'report': {
       const horizon = (args[0] ?? '1d') as ForwardHorizon;
       const app = makeApp();
@@ -313,6 +527,61 @@ async function main(): Promise<void> {
   }
 }
 
+/* --------------------------------------------------------------- replay */
+
+function printReplayReport(r: ReplayResult): void {
+  out();
+  out(summariseReplay(r));
+
+  heading('REPLAY RESULT');
+  out(`Dataset      ${r.datasetId}`);
+  out(`Strategy     ${r.strategyId} v${r.strategyVersion} (config ${r.signalConfigId})`);
+  out(`Window       ${r.window.from} .. ${r.window.to}`);
+  out(`Cycles       ${r.cycles.length}`);
+  out(`Look-ahead   ${r.lookAheadClean ? 'CLEAN — no event or bar was revealed before its timestamp' : 'CHECK FAILED'}`);
+
+  heading('PERFORMANCE');
+  out(`Return                ${r.returnPct.toFixed(3)}%`);
+  out(`Benchmark             ${r.benchmarkReturnPct.toFixed(3)}%`);
+  out(`Alpha                 ${r.alphaPct.toFixed(3)}%`);
+  out(`Maximum drawdown      ${r.maxDrawdownPct.toFixed(3)}%`);
+  out(`Win rate              ${r.winRatePct.toFixed(1)}% (${r.tradeCount} closed trades)`);
+  out(`Turnover              ${r.turnover.toFixed(3)}x allocation`);
+  out(`Costs                 ${formatUsd(r.totalCostsCents)}`);
+  out(`Sharpe                ${r.sharpe === null ? 'n/a (curve too short)' : r.sharpe.toFixed(3)}`);
+  out(`Equity                ${formatUsd(r.finalEquityCents)} from ${formatUsd(r.startingCapitalCents)}`);
+  out(`Open at end           ${r.openPositionsAtEnd}`);
+
+  heading('SIGNAL QUALITY');
+  out(`Signals generated     ${r.signalsGenerated}`);
+  out(`Measured              ${r.measuredSignals}`);
+  out(`Hit rate              ${r.hitRatePct === null ? 'n/a' : `${r.hitRatePct.toFixed(1)}%`}`);
+  out(`Mean excess return    ${r.meanExcessReturnPct === null ? 'n/a' : `${r.meanExcessReturnPct.toFixed(3)}%`}`);
+  for (const tier of r.sourceTierPerformance) {
+    out(`  ${tier.bucket.padEnd(10)} n=${String(tier.count).padStart(4)}  ` +
+        `hit ${tier.hitRatePct === null ? 'n/a' : `${tier.hitRatePct.toFixed(0)}%`}`);
+  }
+
+  heading('RISK INTERVENTIONS');
+  out(`Total                 ${r.riskInterventions}`);
+  for (const [check, n] of Object.entries(r.riskInterventionsByCheck).sort((a, b) => b[1] - a[1])) {
+    out(`  ${check.padEnd(28)} ${n}`);
+  }
+  out(`Filter verdicts       ${Object.entries(r.filterVerdicts).map(([k, v]) => `${k}=${v}`).join(' · ') || 'none'}`);
+  out(`Health incidents      ${r.healthIncidents.length}`);
+  out(`Errors                ${r.errors.length}`);
+
+  if (r.trades.length > 0) {
+    heading(`TRADES (${r.trades.length})`);
+    for (const t of r.trades) {
+      out(`  ${t.ticker.padEnd(6)} ${t.openedAt.slice(5, 16)} -> ${(t.closedAt ?? 'open').slice(5, 16)}  ` +
+          `${t.entryPrice.toFixed(2)} -> ${t.exitPrice?.toFixed(2) ?? '   —'}  ` +
+          `${formatSignedUsd(t.realisedPnlCents)} (${t.realisedPct === null ? 'n/a' : `${t.realisedPct.toFixed(2)}%`})  ` +
+          `${t.exitReason ?? ''}`);
+    }
+  }
+}
+
 /* --------------------------------------------------- paper qualification */
 
 function printQualificationReport(app: NorthstarApp, horizon: ForwardHorizon): void {
@@ -411,6 +680,13 @@ function printHelp(): void {
   serve [--mode PAPER]     start the Trading Lab dashboard
   status                   strategy status and capital ledger
   simulate [--cycles 60]   offline paper simulation over the real pipeline
+  replay sample            write a deterministic sample replay dataset
+  replay export --days 7   freeze what a live run saw, for reproducible replay
+  replay run <file>        replay a dataset through the real pipeline
+  compare <file> --versions a,b   run two strategy versions over one dataset
+  reconcile                compare the ledger with the broker (read-only)
+  readiness                PASS/FAIL gates before the first real-credential run
+  audit [signalId]         full evidential trail behind one signal
   report [1h|1d|1w|1m]     paper-qualification report
   signals [n]              recent signals with full explanations
   trace <id>               reconstruct a decision chain end to end

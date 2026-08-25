@@ -7,6 +7,7 @@
  */
 import type { Clock } from '../../core/index.js';
 import type { MarketCalendarStatus, PriceBar, Quote } from '../../domain/types.js';
+import type { PriceBarRepo } from '../../persistence/store.js';
 import { marketStatus } from './marketCalendar.js';
 import type { MarketDataProvider } from './MarketDataProvider.js';
 import { MarketDataError } from './MarketDataProvider.js';
@@ -35,6 +36,15 @@ export class FixtureMarketDataProvider implements MarketDataProvider {
   private quoteAgeMinutes: number;
   private forceMarketOpen: boolean | null;
   private failWith: MarketDataError | null;
+  /**
+   * Optional write-through cache, mirroring TiingoMarketDataProvider.
+   *
+   * Without it, a fixture-backed run leaves `price_bars` empty and
+   * `replay export` finds no history — so the export path would only ever work
+   * in production. Attaching the cache keeps dev, test and production on the
+   * same path.
+   */
+  private barCache: PriceBarRepo | null = null;
 
   constructor(opts: FixtureMarketDataOptions) {
     this.clock = opts.clock;
@@ -44,6 +54,12 @@ export class FixtureMarketDataProvider implements MarketDataProvider {
     this.quoteAgeMinutes = opts.quoteAgeMinutes ?? 0;
     this.forceMarketOpen = opts.forceMarketOpen ?? null;
     this.failWith = opts.failWith ?? null;
+  }
+
+  /** Write bars through to the local cache, as the real provider does. */
+  attachBarCache(bars: PriceBarRepo): void {
+    this.barCache = bars;
+    for (const list of Object.values(this.barsByTicker)) bars.saveMany(list);
   }
 
   setPrice(ticker: string, price: number): void {
@@ -94,10 +110,12 @@ export class FixtureMarketDataProvider implements MarketDataProvider {
     }
     this.barsByTicker[symbol] = bars;
     this.prices[symbol] = endPrice;
+    this.barCache?.saveMany(bars);
   }
 
   setBars(ticker: string, bars: PriceBar[]): void {
     this.barsByTicker[ticker.toUpperCase()] = bars;
+    this.barCache?.saveMany(bars);
     const last = bars[bars.length - 1];
     if (last) this.prices[ticker.toUpperCase()] = last.close;
   }

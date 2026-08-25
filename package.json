@@ -23,7 +23,12 @@
     "paper": "npm run lab -- paper",
     "status": "npm run lab -- status",
     "report": "npm run lab -- report",
-    "simulate": "npm run lab -- simulate"
+    "simulate": "npm run lab -- simulate",
+    "readiness": "npm run lab -- readiness",
+    "reconcile": "npm run lab -- reconcile",
+    "replay": "npm run lab -- replay",
+    "compare": "npm run lab -- compare",
+    "audit": "npm run lab -- audit"
   },
   "devDependencies": {
     "typescript": "^5.6.0",

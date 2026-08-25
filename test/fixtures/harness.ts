@@ -100,6 +100,10 @@ export function createHarness(opts: HarnessOptions = {}): Harness {
     databasePath: ':memory:',
   });
 
+  // Mirror the production write-through so `replay export` has history to
+  // export in tests and offline development, not only against Tiingo.
+  marketData.attachBarCache(app.store.bars);
+
   if (opts.seed !== false) app.seed();
 
   return {

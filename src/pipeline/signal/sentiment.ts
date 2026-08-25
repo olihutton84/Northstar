@@ -82,6 +82,46 @@ const INTENSIFIERS: Record<string, number> = {
   slightly: 0.6, marginally: 0.55, modest: 0.7, slight: 0.6,
 };
 
+/**
+ * Directional patterns for the phrasings that matter most.
+ *
+ * Plain phrase entries in the lexicon match by adjacency, so "raises guidance"
+ * hits but "raises ITS FULL-YEAR guidance" does not — and a guidance change is
+ * the single most repriceable thing a company says. These patterns allow a
+ * bounded gap between the verb and the noun, so the common real-world phrasings
+ * score the same as the terse ones.
+ *
+ * Matched spans are consumed before word-level scoring, so nothing double
+ * counts.
+ */
+const PHRASE_PATTERNS: { re: RegExp; polarity: number; label: string }[] = [
+  {
+    re: /\b(raise[sd]?|raising|lift(?:s|ed|ing)?|boost(?:s|ed|ing)?|hike[sd]?|increase[sd]?)\s+(?:[\w$.,%-]+\s+){0,3}?(guidance|outlook|forecast)\b/gi,
+    polarity: 1,
+    label: 'raises guidance',
+  },
+  {
+    re: /\b(cuts?|cutting|lower[sd]?|lowering|slash(?:es|ed)?|trim(?:s|med)?|reduce[sd]?|withdraw[sn]?)\s+(?:[\w$.,%-]+\s+){0,3}?(guidance|outlook|forecast)\b/gi,
+    polarity: -1,
+    label: 'cuts guidance',
+  },
+  {
+    re: /\b(beats?|beat|exceed(?:s|ed)?|tops?|ahead of|above)\s+(?:[\w$.,%-]+\s+){0,2}?(expectations?|consensus|estimates?|forecasts?|street)\b/gi,
+    polarity: 0.9,
+    label: 'beats expectations',
+  },
+  {
+    re: /\b(miss(?:es|ed)?|below|short of|trail(?:s|ed)?|under)\s+(?:[\w$.,%-]+\s+){0,2}?(expectations?|consensus|estimates?|forecasts?|street)\b/gi,
+    polarity: -0.9,
+    label: 'misses expectations',
+  },
+  {
+    re: /\brecord\s+(?:[\w$.,%-]+\s+){0,2}?(revenue|profit|earnings|quarter|sales|demand|backlog)\b/gi,
+    polarity: 0.9,
+    label: 'record results',
+  },
+];
+
 const PHRASES = Object.keys(LEXICON).filter((k) => k.includes(' ')).sort((a, b) => b.length - a.length);
 const WORDS = new Set(Object.keys(LEXICON).filter((k) => !k.includes(' ')));
 
@@ -94,7 +134,26 @@ export function scoreSentiment(text: string): SentimentResult {
   const hits: SentimentHit[] = [];
   let consumed = normalised;
 
-  // Phrases first: "beats expectations" must not be scored as "beats" alone.
+  // Gap-tolerant patterns first: they cover the phrasings that carry the most
+  // information and would otherwise be scored a word at a time, or missed.
+  for (const pattern of PHRASE_PATTERNS) {
+    pattern.re.lastIndex = 0;
+    for (const match of [...consumed.matchAll(pattern.re)]) {
+      const index = match.index ?? -1;
+      if (index < 0) continue;
+      const before = consumed.slice(Math.max(0, index - 40), index);
+      hits.push({
+        term: pattern.label,
+        polarity: pattern.polarity,
+        negated: hasNegator(before),
+        weight: intensityFrom(before),
+      });
+      consumed =
+        `${consumed.slice(0, index)}${' '.repeat(match[0].length)}${consumed.slice(index + match[0].length)}`;
+    }
+  }
+
+  // Then literal phrases: "beats expectations" must not be scored as "beats".
   for (const phrase of PHRASES) {
     let index = consumed.indexOf(phrase);
     while (index !== -1) {

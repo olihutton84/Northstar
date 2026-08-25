@@ -15,6 +15,7 @@ import type { Logger } from '../core/index.js';
 import { formatSignedUsd, formatUsd } from '../core/index.js';
 import type { NorthstarApp } from '../app.js';
 import { buildDashboard } from './dashboard.js';
+import { buildObservability } from './observability.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -82,6 +83,29 @@ export class ApiServer {
     /* --- dashboard ------------------------------------------------------ */
     r('GET', /^\/api\/dashboard$/, async (_req, res) => {
       this.sendJson(res, 200, await buildDashboard(this.app));
+    });
+
+    /* --- observability --------------------------------------------------- */
+    r('GET', /^\/api\/observability$/, (_req, res) => {
+      this.sendJson(res, 200, buildObservability(this.app));
+    });
+
+    /* --- signal audit ----------------------------------------------------- */
+    r('GET', /^\/api\/signals\/([\w-]+)\/audit$/, (_req, res, params) => {
+      const view = this.app.audit.audit(params[0]!);
+      if (!view) return this.sendJson(res, 404, { error: 'Signal not found' });
+      this.sendJson(res, 200, view);
+    });
+
+    /* --- reconciliation (read-only) --------------------------------------- */
+    r('GET', /^\/api\/reconcile$/, async (_req, res) => {
+      this.sendJson(res, 200, await this.app.reconciliation.reconcile());
+    });
+
+    /* --- readiness (read-only; never submits an order) -------------------- */
+    r('GET', /^\/api\/readiness$/, async (_req, res) => {
+      const report = await this.app.readiness.run();
+      this.sendJson(res, report.overall === 'PASS' ? 200 : 503, report);
     });
 
     r('GET', /^\/api\/health$/, (_req, res) => {

@@ -99,6 +99,50 @@ incident. The common ones:
 A paused strategy keeps observing and recording. Resuming clears open incidents
 and resets the failure counters.
 
+## Before the first real-credential run
+
+```bash
+npm run readiness
+```
+
+PASS/FAIL gates for: credentials loaded, X reachable, Tiingo reachable, Alpaca
+PAPER reachable, market status known, ledger reconciled, kill switch functional,
+no unresolved migrations, no pending corrupt state, and provider banner
+accurate. Exit code 0 on PASS, 1 on FAIL.
+
+Every check is read-only. **Readiness never submits an order.** The kill-switch
+check in particular is a *dry* evaluation: it proves the interlock rejects a
+killed strategy by evaluating risk against a copy of the strategy record, and
+never touches the running one.
+
+```bash
+npm run reconcile
+```
+
+Compares the Northstar ledger against the broker's orders, fills and positions
+and reports discrepancies by severity. It is strictly read-only and repairs
+nothing — when the two sides disagree one of them is wrong, and an automated fix
+has even odds of destroying the evidence needed to work out which.
+
+Note on a shared account: a broker position *larger* than Northstar's is not a
+discrepancy (another strategy or a manual trade may hold it). Only a shortfall
+is, because that means Northstar believes it owns something the broker cannot
+confirm.
+
+## Auditing a signal
+
+```bash
+npm run audit                 # most recent signal
+npm run audit -- <signalId>   # a specific one
+```
+
+Or click **Full audit trail** under the signal feed in Trading Lab. Shows the
+source posts with tiers and filter verdicts, entity-resolution confidence per
+post, every scored dimension with the points it contributed, the price data used
+for confirmation, the evidence against — and **why the signal did or did not
+become a proposal**, taken from the recorded disposition rather than
+re-derived from thresholds after the fact.
+
 ## Offline qualification
 
 ```bash

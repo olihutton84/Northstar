@@ -558,6 +558,12 @@ export class ProposalRepo {
     this.db.run('UPDATE trade_proposals SET risk_decision_id = ? WHERE proposal_id = ?', riskDecisionId, proposalId);
   }
 
+  bySignal(signalId: string): TradeProposal[] {
+    return this.db
+      .all('SELECT * FROM trade_proposals WHERE signal_id = ? ORDER BY created_at DESC', signalId)
+      .map(ProposalRepo.map);
+  }
+
   byStatus(...statuses: ProposalStatus[]): TradeProposal[] {
     const ph = statuses.map(() => '?').join(',');
     return this.db.all(`SELECT * FROM trade_proposals WHERE status IN (${ph}) ORDER BY created_at DESC`, ...statuses)
