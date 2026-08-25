@@ -1,0 +1,28 @@
+{
+  "name": "northstar",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Northstar — Trading Lab. X Signal Bot v0.1 (X -> Signal -> Risk -> Alpaca).",
+  "type": "module",
+  "engines": { "node": ">=22.5.0" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rm -rf dist",
+    "test": "npm run build && node --test dist/test/**/*.test.js",
+    "test:unit": "npm run build && node --test dist/test/unit/*.test.js",
+    "test:integration": "npm run build && node --test dist/test/integration/*.test.js",
+    "test:failure": "npm run build && node --test dist/test/failure/*.test.js",
+    "lab": "npm run build && node dist/src/cli/northstar.js",
+    "serve": "npm run build && node dist/src/cli/northstar.js serve",
+    "migrate": "npm run build && node dist/src/cli/northstar.js migrate",
+    "seed": "npm run build && node dist/src/cli/northstar.js seed",
+    "cycle": "npm run build && node dist/src/cli/northstar.js cycle",
+    "paper": "npm run build && node dist/src/cli/northstar.js paper",
+    "report": "npm run build && node dist/src/cli/northstar.js report"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "@types/node": "^22.7.0"
+  }
+}

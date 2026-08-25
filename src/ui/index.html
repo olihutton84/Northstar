@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>X Signal Bot — Northstar Trading Lab</title>
+<link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">NORTHSTAR</span>
+    <span class="brand-sub">Trading Lab</span>
+  </div>
+  <div class="topbar-actions">
+    <button id="btn-cycle" class="btn">Run cycle</button>
+    <button id="btn-refresh" class="btn btn-ghost">Refresh</button>
+    <button id="btn-kill" class="btn btn-danger">KILL BOT</button>
+    <button id="btn-resume" class="btn btn-ghost hidden">Resume</button>
+  </div>
+</header>
+
+<main id="root">
+  <section class="hero">
+    <div class="hero-title">
+      <h1>X SIGNAL BOT</h1>
+      <div class="hero-meta">
+        <span id="strategy-id" class="mono"></span>
+        <span id="strategy-version" class="chip"></span>
+        <span id="status-chip" class="chip"></span>
+        <span id="runstate-chip" class="chip"></span>
+        <span id="mode-chip" class="chip"></span>
+      </div>
+    </div>
+    <div id="halt-banner" class="banner hidden"></div>
+  </section>
+
+  <section class="stat-grid" id="stats"></section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Bot Equity vs Benchmark</h2>
+      <span class="panel-note" id="chart-note"></span>
+    </div>
+    <div id="equity-chart" class="chart"></div>
+  </section>
+
+  <section class="panel" id="approval-panel" hidden>
+    <div class="panel-head">
+      <h2>Awaiting your approval — LIVE order</h2>
+      <span class="panel-note">No live order is submitted without an explicit approval of these exact terms.</span>
+    </div>
+    <div id="approval-list"></div>
+  </section>
+
+  <div class="two-col">
+    <section class="panel">
+      <div class="panel-head"><h2>Live Signal Feed</h2><span class="panel-note" id="feed-note"></span></div>
+      <div class="table-scroll">
+        <table class="grid" id="signal-table">
+          <thead><tr>
+            <th>Ticker</th><th>Signal</th><th>Score</th><th>Sources</th><th>Uncertainty</th><th>Time</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div id="signal-detail" class="detail"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>Trade Proposals</h2></div>
+      <div class="table-scroll">
+        <table class="grid" id="proposal-table">
+          <thead><tr>
+            <th>Ticker</th><th>Amount</th><th>Shares</th><th>Status</th><th>Risk</th><th>Created</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <div class="two-col">
+    <section class="panel">
+      <div class="panel-head"><h2>Open Positions</h2></div>
+      <div class="table-scroll">
+        <table class="grid" id="position-table">
+          <thead><tr>
+            <th>Ticker</th><th>Qty</th><th>Entry</th><th>Last</th><th>Value</th><th>P&amp;L</th><th>Held</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>Recent Trades</h2></div>
+      <div class="table-scroll">
+        <table class="grid" id="trade-table">
+          <thead><tr>
+            <th>Ticker</th><th>Entry</th><th>Exit</th><th>P&amp;L</th><th>Held</th><th>Exit reason</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <div class="two-col">
+    <section class="panel">
+      <div class="panel-head"><h2>Signal Performance</h2><span class="panel-note" id="perf-caveat"></span></div>
+      <div id="signal-performance"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>Source Analytics</h2></div>
+      <div id="source-analytics"></div>
+    </section>
+  </div>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Risk</h2><span class="panel-note" id="risk-note"></span></div>
+    <div id="risk-panel"></div>
+  </section>
+
+  <footer class="foot">
+    <span id="generated-at"></span>
+    <span class="foot-note">
+      Paper mode runs unattended. Live mode requires per-order human approval; no X or model-generated
+      text can reach the broker without it.
+    </span>
+  </footer>
+</main>
+
+<div id="modal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-head">
+      <h3 id="modal-title">Approve order</h3>
+      <button class="btn btn-ghost" id="modal-close">Close</button>
+    </div>
+    <div id="modal-body"></div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
