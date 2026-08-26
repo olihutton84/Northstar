@@ -19,6 +19,7 @@ import { join } from 'node:path';
 
 import { createHarness } from '../fixtures/harness.js';
 import { realDataConfigured, unrealProviders, xPosture } from '../../src/runtime/dataPosture.js';
+import { buildObservability } from '../../src/api/observability.js';
 import type { ProviderSummary } from '../../src/app.js';
 import { NO_MANUAL_WINDOW } from '../../src/config/manualIngest.js';
 
@@ -241,6 +242,131 @@ describe('readiness and the autonomy gate cannot disagree', () => {
     assert.equal(closedX, false, 'the shared rule flips');
     assert.equal(asPaper(), 'INCOHERENT', 'and so does the gate: manual data is no longer real');
     assert.match(closedCredentials!.detail, /X ABSENT/, 'and readiness starts requiring the token again');
+    h.close();
+  });
+});
+
+/* ============================== 5. operator-facing surfaces agree ========= */
+
+describe('every operator-facing surface reports the same posture', () => {
+  /**
+   * The bug this pins.
+   *
+   * `npm run status` printed "Running on fixtures. No live data or orders."
+   * while readiness said READY FOR REAL-DATA PAPER and the gate agreed. Three
+   * surfaces, three independent answers, one of them wrong — and the wrong one
+   * was the one an operator reads before deciding whether to trust the run.
+   */
+  function manualHarness() {
+    const dir = mkdtempSync(join(tmpdir(), 'northstar-surfaces-'));
+    const databasePath = join(dir, 'db.sqlite');
+    const opener = createHarness({ databasePath });
+    opener.app.manualIngest.startExperiment('op', 'surfaces');
+    opener.close();
+    const h = createHarness({ databasePath, selectSocialProvider: true });
+    return { ...h, close: () => { h.close(); rmSync(dir, { recursive: true, force: true }); } };
+  }
+
+  it('does not call the manual X provider a fixture', () => {
+    /*
+     * Precisely X. This harness really does run fixture market data and a
+     * simulated broker, so "fixture" legitimately appears in the summary — the
+     * claim under test is that X is not among them.
+     */
+    const h = manualHarness();
+    const o = buildObservability(h.app);
+    const unreal = unrealProviders(h.app.describeProviders(), h.app.manualIngestPermission());
+    assert.ok(!unreal.some((u) => u.startsWith('X ')), `X must not be listed as unreal: ${unreal.join(', ')}`);
+    assert.match(o.providers.xLabel, /MANUAL REAL OBSERVED DATA/);
+    // And the old wording is gone entirely.
+    assert.doesNotMatch(o.summary.connectedDetail, /Running on fixtures/i);
+    h.close();
+  });
+
+  it('drops the manual X provider into the unreal list once the window closes', () => {
+    const h = manualHarness();
+    h.app.manualIngest.stopExperiment('closed');
+    const unreal = unrealProviders(h.app.describeProviders(), h.app.manualIngestPermission());
+    assert.ok(unreal.some((u) => u.startsWith('X ')), 'a closed window makes X unusable again');
+    h.close();
+  });
+
+  it('labels a fixture run as a fixture run', () => {
+    const h = createHarness(); // fixtures forced
+    const o = buildObservability(h.app);
+    assert.equal(o.providers.realData, false);
+    assert.match(o.providers.xLabel, /FIXTURE/);
+    assert.match(o.summary.connectedDetail, /Not real data/);
+    h.close();
+  });
+
+  it('never labels manual data as LIVE', () => {
+    const h = manualHarness();
+    const o = buildObservability(h.app);
+    assert.notEqual(o.providers.xLabel, 'X API LIVE');
+    assert.notEqual(o.providers.x, 'LIVE');
+    assert.equal(o.providers.x, 'MANUAL', 'the provenance stays distinguishable');
+    h.close();
+  });
+
+  it('uses ONE label string, shared with the canonical posture', () => {
+    // Two spellings of the same state is how surfaces drift apart again.
+    const h = manualHarness();
+    const o = buildObservability(h.app);
+    const canonical = xPosture(h.app.describeProviders(), h.app.manualIngestPermission());
+    assert.equal(o.providers.xLabel, canonical.label);
+    h.close();
+  });
+
+  it('uses the posture, not `allReal`, where the two genuinely differ', () => {
+    /*
+     * The exact shape of the reported bug, and the one case that can catch it.
+     *
+     * With manual X plus REAL Tiingo and REAL Alpaca PAPER, `allReal` is false
+     * (X is not the vendor API) while the configuration is unambiguously real
+     * data. Anywhere those two are conflated, this configuration reports a
+     * fixture run. Every other harness has fixture market data too, so
+     * `allReal` and `realData` agree there and the mistake hides.
+     */
+    const h = manualHarness();
+    const real = {
+      ...h.app.describeProviders(),
+      x: 'MANUAL' as const,
+      marketData: 'TIINGO' as const,
+      broker: 'ALPACA PAPER',
+      allReal: false,
+    };
+    h.app.describeProviders = () => real;
+
+    assert.equal(real.allReal, false, 'precondition: allReal is false for manual X');
+    assert.equal(
+      realDataConfigured(real, h.app.manualIngestPermission()), true,
+      'precondition: but it IS real data',
+    );
+
+    const o = buildObservability(h.app);
+    assert.equal(o.providers.realData, true, 'the dashboard must follow the posture, not allReal');
+    assert.equal(o.summary.connected, true, 'and must not report a fixture run');
+    assert.doesNotMatch(o.summary.connectedDetail, /Not real data/);
+    assert.match(o.summary.connectedDetail, /MANUAL REAL OBSERVED DATA/);
+    h.close();
+  });
+
+  it('agrees with readiness and the gate about whether this is real data', async () => {
+    const h = manualHarness();
+    const o = buildObservability(h.app);
+    const report = await h.app.readiness.run();
+    const canonical = realDataConfigured(h.app.describeProviders(), h.app.manualIngestPermission());
+
+    assert.equal(o.providers.realData, canonical, 'the dashboard must match the canonical rule');
+    assert.equal(report.liveDataConfigured, canonical, 'and so must readiness');
+    h.close();
+  });
+
+  it('reports LIVE trading as disabled while the broker is PAPER', () => {
+    const h = manualHarness();
+    assert.notEqual(h.app.broker.mode, 'LIVE');
+    assert.notEqual(h.app.describeProviders().mode, 'LIVE');
     h.close();
   });
 });

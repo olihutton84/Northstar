@@ -281,8 +281,10 @@ function renderHealth() {
   const up = pr.uptimeMinutes;
 
   $('#health-note').textContent =
-    `Process up ${ago(up)} · ${p.allReal ? 'all providers live' : 'fixtures in use'}` +
-    (p.forcedFixtures ? ' (forced by NORTHSTAR_USE_FIXTURES)' : '');
+    // The canonical posture, computed server-side. Manual real posts are real
+    // data and must never read as "fixtures in use".
+    `Process up ${ago(up)} · ${p.realData ? 'all providers real' : 'not real data'}` +
+    (p.forcedFixtures ? ' (fixtures forced by NORTHSTAR_USE_FIXTURES)' : '');
 
   const a = health.autonomy;
   const e = health.epoch;
@@ -345,7 +347,7 @@ function renderHealth() {
       health.killSwitch.openIncidents[0]?.fault ?? 'none')}
   </div>
   ${p.x === 'MANUAL' ? `<div class="banner banner-manual" style="margin-top:12px">
-      X DATA: MANUAL REAL POSTS — operator-supplied, not the X API.
+      X DATA: ${esc(p.xLabel)} — operator-supplied, not the X API.
       <div style="margin-top:6px;opacity:.85;font-weight:normal">
         ${p.manual.active
           ? `Every trade traces back to a URL you supplied. Experiment expires ${esc(p.manual.expiresAt || '')} (${p.manual.hoursRemaining}h left).`

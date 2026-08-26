@@ -124,7 +124,9 @@ export class ReadinessService {
       await this.probe({
         id: 'x-reachable',
         label: 'X reachable',
-        skipWhen: providers.x !== 'LIVE',
+        // Only the API can be unreachable. Manual posts are already here, and
+        // fixtures are not anywhere.
+        skipWhen: posture.posture !== 'API_LIVE',
         skipDetail:
           posture.posture === 'MANUAL_EXPERIMENT'
             ? 'Operator-supplied posts need no vendor call; there is nothing to reach.'
@@ -668,8 +670,21 @@ export class ReadinessService {
     const forced = providers.forcedFixtures;
 
     if (!forced) {
-      if ((xState === 'CONFIGURED') !== (providers.x === 'LIVE')) {
-        problems.push(`banner says X ${providers.x} but credentials are ${xState}`);
+      /*
+       * The X row is checked against the POSTURE, not against "is it the API".
+       *
+       * A manual experiment has no bearer token by design, so comparing
+       * `CONFIGURED` to `x === 'LIVE'` only happens to agree — it agrees
+       * because both sides are false, not because the check understands manual
+       * ingest. Stated properly, so it keeps agreeing for the right reason.
+       */
+      const posture = xPosture(providers, this.app.manualIngestPermission());
+      const tokenExpected = posture.posture === 'API_LIVE';
+      if ((xState === 'CONFIGURED') !== tokenExpected) {
+        problems.push(
+          `banner says X ${posture.label} but credentials are ${xState}` +
+          (posture.posture === 'MANUAL_EXPERIMENT' ? ' (a manual experiment needs no token)' : ''),
+        );
       }
       if ((tiingoState === 'CONFIGURED') !== (providers.marketData === 'TIINGO')) {
         problems.push(`banner says market data ${providers.marketData} but credentials are ${tiingoState}`);
@@ -687,7 +702,8 @@ export class ReadinessService {
       status: problems.length === 0 ? 'PASS' : 'FAIL',
       detail:
         problems.length === 0
-          ? `X ${providers.x} · Market Data ${providers.marketData} · Broker ${providers.broker} · Mode ${providers.mode}` +
+          ? `X ${xPosture(providers, this.app.manualIngestPermission()).label} · ` +
+            `Market Data ${providers.marketData} · Broker ${providers.broker} · Mode ${providers.mode}` +
             (forced ? ' (fixtures forced by NORTHSTAR_USE_FIXTURES)' : '')
           : problems.join('; '),
       ...(problems.length === 0 ? {} : { remedy: 'The banner disagrees with configuration — treat every other check as suspect.' }),

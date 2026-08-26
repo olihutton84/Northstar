@@ -31,6 +31,7 @@ import { ApiServer } from '../api/server.js';
 import { startBotProcess } from '../runtime/BotProcess.js';
 import { assessStorage, databaseDirectoryUsable, type StorageVerdict } from '../runtime/StorageCheck.js';
 import { maxPositionCentsFor } from '../config/executionEpochs.js';
+import { realDataConfigured, unrealProviders, xPosture } from '../runtime/dataPosture.js';
 import type { ForwardHorizon, TradingMode } from '../domain/types.js';
 import { openDatabase } from '../persistence/db.js';
 import { runSimulation, summarise } from './simulation.js';
@@ -234,11 +235,22 @@ function printProviderBanner(app: NorthstarApp): void {
   const tag = (value: string, real: boolean): string =>
     `${real ? GREEN : YELLOW}${value}${RESET}`;
 
+  /*
+   * The X row is described by the CANONICAL posture, not by "is it the API".
+   *
+   * Operator-supplied posts inside an open experiment window are real observed
+   * data. Testing for `x === 'LIVE'` made the banner call them fixtures, which
+   * contradicted both readiness and the execution gate — and told the operator
+   * the bot was running on invented data when it was not.
+   */
+  const posture = xPosture(p, app.manualIngestPermission());
+
   out();
-  out(`X:            ${tag(p.x, p.x === 'LIVE')}`);
+  out(`X:            ${tag(posture.label, posture.realData)}`);
   out(`Market Data:  ${tag(p.marketData, p.marketData === 'TIINGO')}`);
   out(`Broker:       ${tag(p.broker, p.broker.startsWith('ALPACA'))}`);
   out(`Mode:         ${p.mode}`);
+  out(`LIVE trading: ${p.broker === 'ALPACA LIVE' || p.mode === 'LIVE' ? `${RED}ENABLED${RESET}` : `${GREEN}DISABLED${RESET}`}`);
 
   // Never let fallback data read as live Platform state.
   const u = p.universe;
@@ -255,13 +267,26 @@ function printProviderBanner(app: NorthstarApp): void {
 
   if (p.forcedFixtures) {
     out(`${YELLOW}NORTHSTAR_USE_FIXTURES=true — fixtures are forced, any real credentials are ignored.${RESET}`);
-  } else if (!p.allReal) {
+  } else if (!realDataConfigured(p, app.manualIngestPermission())) {
+    /*
+     * Only what is genuinely NOT real data is listed, and the X token is only
+     * requested when the posture actually needs one — during a manual
+     * experiment it does not, which is the entire point of the experiment.
+     */
     const missing: string[] = [];
-    if (p.x === 'FIXTURE') missing.push('X_BEARER_TOKEN');
+    if (posture.credentialsRequired && !posture.realData) missing.push('X_BEARER_TOKEN');
     if (p.marketData === 'FIXTURE') missing.push('TIINGO_API_KEY');
     if (!p.broker.startsWith('ALPACA')) missing.push('ALPACA_PAPER_KEY_ID + ALPACA_PAPER_SECRET_KEY');
-    out(`${YELLOW}Running on fixtures. No live data or orders. Set: ${missing.join(', ')}${RESET}`);
-    out(`${DIM}Put them in .env at the repo root; npm scripts load it automatically.${RESET}`);
+    out(`${YELLOW}Not real data: ${unrealProviders(p, app.manualIngestPermission()).join(', ')}${RESET}`);
+    if (missing.length > 0) {
+      out(`${YELLOW}No live data or orders until you set: ${missing.join(', ')}${RESET}`);
+      out(`${DIM}Put them in .env at the repo root; npm scripts load it automatically.${RESET}`);
+    }
+  } else if (posture.posture === 'MANUAL_EXPERIMENT') {
+    // Real, but not the API. Said plainly so it is never mistaken for either
+    // a fixture run or a live API session.
+    out(`${GREEN}Real data. X is operator-supplied, not the X API.${RESET}`);
+    out(`${DIM}${posture.detail}${RESET}`);
   }
   out();
 }

@@ -16,6 +16,7 @@ import { marketStatus } from '../providers/marketdata/marketCalendar.js';
 import type { NorthstarApp } from '../app.js';
 import { fingerprintVersion } from '../config/strategyRegistry.js';
 import { maxPositionCentsFor } from '../config/executionEpochs.js';
+import { realDataConfigured, unrealProviders, xPosture } from '../runtime/dataPosture.js';
 
 export interface ObservabilityPayload {
   at: string;
@@ -46,6 +47,8 @@ export interface ObservabilityPayload {
     mode: string;
     forcedFixtures: boolean;
     allReal: boolean;
+    /** Every provider is real data. Manual experiment counts; fixtures never do. */
+    realData: boolean;
     /** Which universe is active. PLATFORM data and the bot's own fallback are never conflated. */
     universe: {
       origin: string;
@@ -245,19 +248,6 @@ export interface ObservabilityPayload {
   }[];
 }
 
-/**
- * How the X data source should be described, in words.
- *
- * "MANUAL REAL POSTS" rather than "X API LIVE" is the whole point: the posts
- * are real, and the route they took to get here is not the API. Collapsing the
- * two would misrepresent where the evidence came from.
- */
-export function xDataLabel(x: string): string {
-  if (x === 'LIVE') return 'X API LIVE';
-  if (x === 'MANUAL') return 'MANUAL REAL POSTS';
-  return 'FIXTURE (not real data)';
-}
-
 export function buildObservability(app: NorthstarApp): ObservabilityPayload {
   const now = app.clock.nowIso();
   const nowMs = app.clock.nowMs();
@@ -268,6 +258,8 @@ export function buildObservability(app: NorthstarApp): ObservabilityPayload {
     app.epoch.capitalCents, app.spec.riskLimits.maxPositionPctOfEquity);
 
   const providers = app.describeProviders();
+  const posture = xPosture(providers, manualPermission);
+  const realData = realDataConfigured(providers, manualPermission);
   const health = app.health.state();
   const strategy = app.store.strategies.byId(strategyId);
   const ledger = app.ledger.get();
@@ -299,7 +291,7 @@ export function buildObservability(app: NorthstarApp): ObservabilityPayload {
 
     providers: {
       x: providers.x,
-      xLabel: xDataLabel(providers.x),
+      xLabel: posture.label,
       manual: {
         active: providers.manual.active,
         startedAt: providers.manual.startedAt,
@@ -315,6 +307,12 @@ export function buildObservability(app: NorthstarApp): ObservabilityPayload {
       mode: providers.mode,
       forcedFixtures: providers.forcedFixtures,
       allReal: providers.allReal,
+      /**
+       * Whether every provider counts as REAL DATA — the canonical posture
+       * answer, distinct from `allReal` (all three are the vendor integration).
+       * A manual experiment is real data without being the vendor.
+       */
+      realData,
       ids: {
         social: app.social.providerId,
         marketData: app.marketData.providerId,
@@ -424,14 +422,19 @@ export function buildObservability(app: NorthstarApp): ObservabilityPayload {
     },
 
     summary: {
-      // "Connected" means the real vendors are wired AND none of them is in a
-      // failure state. Either half alone would be misleading.
-      connected: providers.allReal && health.runState === 'RUNNING',
-      connectedDetail: providers.allReal
+      /*
+       * "Connected" means every provider is REAL DATA and none is in a failure
+       * state. Real data is not the same question as "is it the vendor API":
+       * operator-supplied posts inside an open window are real, and reporting
+       * them as fixtures told the operator the bot was running on invented data
+       * when it was not.
+       */
+      connected: realData && health.runState === 'RUNNING',
+      connectedDetail: realData
         ? health.runState === 'RUNNING'
-          ? 'X, Tiingo and Alpaca all live and healthy'
-          : `Providers are live but the strategy is ${health.runState}`
-        : `Running on fixtures: X ${providers.x}, market data ${providers.marketData}, broker ${providers.broker}`,
+          ? `${posture.label}, Tiingo and Alpaca all healthy`
+          : `Providers are real but the strategy is ${health.runState}`
+        : `Not real data: ${unrealProviders(providers, manualPermission).join(', ')}`,
       pollingState: polling.state,
       pollingReason: polling.reason,
       nextScanSeconds: polling.intervalSeconds,

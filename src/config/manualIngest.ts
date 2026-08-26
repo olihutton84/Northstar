@@ -10,7 +10,7 @@
  *   PROVENANCE. A manual observation is not a fixture and is never presented as
  *   API data. It carries the URL it came from, who supplied it and when, and
  *   every trade taken because of it can be traced back to that URL. The
- *   dashboard says MANUAL REAL POSTS, never X API LIVE.
+ *   dashboard says MANUAL REAL OBSERVED DATA, never X API LIVE.
  *
  *   AN EXPIRY THAT IS NOT NEGOTIABLE. The window is at most seven days, and the
  *   maximum lives HERE, in code, not in the record the operator creates. An
