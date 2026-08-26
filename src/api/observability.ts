@@ -12,6 +12,8 @@
  * gets mistaken for "X has been quiet for an hour".
  */
 import { formatUsd, round } from '../core/index.js';
+import { estimateDailyXRequests } from '../config/operations.js';
+import { marketStatus } from '../providers/marketdata/marketCalendar.js';
 import type { NorthstarApp } from '../app.js';
 
 export interface ObservabilityPayload {
@@ -93,6 +95,90 @@ export interface ObservabilityPayload {
     haltReason: string | null;
     openIncidents: { fault: string; at: string; detail: string }[];
   };
+
+  /**
+   * Above the fold: everything needed to answer "is it working and is it
+   * safe?" without scrolling or clicking. Chosen so a glance at the top of the
+   * page rules out the failure modes that matter on day one.
+   */
+  summary: {
+    connected: boolean;
+    connectedDetail: string;
+    pollingState: string;
+    pollingReason: string;
+    nextScanSeconds: number;
+    lastScanAt: string | null;
+    minutesSinceLastScan: number | null;
+    lastPostSeenAt: string | null;
+    minutesSinceLastPost: number | null;
+    xRequestsToday: number;
+    xRequestBudget: number;
+    tradesToday: number;
+    openPositions: number;
+    equity: string;
+    dayPnl: string;
+    marketOpen: boolean;
+    marketReason: string;
+    killSwitch: boolean;
+    runState: string;
+  };
+
+  /** How fast each independent loop runs. */
+  cadence: {
+    xScanSeconds: number;
+    xEventWatchSeconds: number;
+    xPressureSeconds: number;
+    positionMonitorSeconds: number;
+    reconciliationSeconds: number;
+    sameTickerCooldownMinutes: number;
+    signalTtlMinutes: number;
+    estimatedDailyXRequests: number;
+  };
+
+  /** Per-vendor request telemetry. Status codes and headers only. */
+  api: {
+    provider: string;
+    requests: number;
+    successes: number;
+    rateLimited: number;
+    errors: number;
+    lastSuccessAt: string | null;
+    minutesSinceSuccess: number | null;
+    lastErrorAt: string | null;
+    lastErrorKind: string | null;
+    lastErrorDetail: string | null;
+    rateLimitRemaining: number | null;
+    rateLimitLimit: number | null;
+    rateLimitResetAt: string | null;
+    softCapUsedPct: number | null;
+    pressured: boolean;
+    pressureReason: string;
+  }[];
+
+  /** Securities currently polled at the faster event-watch cadence. */
+  eventWatch: { ticker: string; untilIso: string; minutesLeft: number }[];
+
+  funnel: {
+    stages: { stage: string; count: number; meaning: string }[];
+    stalledAt: string | null;
+    narrative: string;
+  };
+
+  /** The raw X side: what came in, and what the pipeline made of each post. */
+  feed: {
+    postId: string;
+    handle: string;
+    tier: string;
+    postedAt: string;
+    capturedAt: string;
+    text: string;
+    url: string;
+    verdict: string | null;
+    verdictReasons: string[];
+    resolvedTickers: string[];
+    signalId: string | null;
+    signalScore: number | null;
+  }[];
 }
 
 export function buildObservability(app: NorthstarApp): ObservabilityPayload {
@@ -113,6 +199,16 @@ export function buildObservability(app: NorthstarApp): ObservabilityPayload {
   const lastEvent = app.store.events.recent(1)[0] ?? null;
   const lastSignal = app.store.signals.recent(1)[0] ?? null;
   const lastCycle = app.store.log.byStage(strategyId, 'INGEST', 1)[0] ?? null;
+
+  const polling = app.polling.status();
+  const scheduler = app.scheduler.status();
+  const xUsage = app.apiMeter.usage('x');
+  const funnel = app.funnel.report();
+  const calendar = marketStatus(app.clock);
+  const dayStart = `${now.slice(0, 10)}T00:00:00.000Z`;
+  const todayOrders = app.store.orders
+    .all()
+    .filter((o) => o.intent === 'ENTRY' && o.submittedAt >= dayStart).length;
 
   const minutesSince = (iso: string | null): number | null =>
     iso === null ? null : round((nowMs - new Date(iso).getTime()) / 60_000, 2);
@@ -213,5 +309,116 @@ export function buildObservability(app: NorthstarApp): ObservabilityPayload {
       haltReason: health.haltReason,
       openIncidents: health.openIncidents.map((i) => ({ fault: i.fault, at: i.at, detail: i.detail })),
     },
+
+    summary: {
+      // "Connected" means the real vendors are wired AND none of them is in a
+      // failure state. Either half alone would be misleading.
+      connected: providers.allReal && health.runState === 'RUNNING',
+      connectedDetail: providers.allReal
+        ? health.runState === 'RUNNING'
+          ? 'X, Tiingo and Alpaca all live and healthy'
+          : `Providers are live but the strategy is ${health.runState}`
+        : `Running on fixtures: X ${providers.x}, market data ${providers.marketData}, broker ${providers.broker}`,
+      pollingState: polling.state,
+      pollingReason: polling.reason,
+      nextScanSeconds: polling.intervalSeconds,
+      lastScanAt: scheduler.lastScanAt ?? lastCycle?.at ?? null,
+      minutesSinceLastScan: minutesSince(scheduler.lastScanAt ?? lastCycle?.at ?? null),
+      lastPostSeenAt: lastEvent?.capturedAt ?? null,
+      minutesSinceLastPost: minutesSince(lastEvent?.capturedAt ?? null),
+      xRequestsToday: xUsage.requests,
+      xRequestBudget: app.ops.xDailyRequestSoftCap,
+      tradesToday: todayOrders,
+      openPositions: app.store.positions.open(strategyId).length,
+      equity: formatUsd(ledger.equityCents),
+      dayPnl: formatUsd(ledger.equityCents - ledger.startingCapitalCents),
+      // The local calendar, not a vendor call: this payload is built on every
+      // dashboard poll and must never cost a request.
+      marketOpen: calendar.isOpen,
+      marketReason: calendar.reason,
+      killSwitch: health.killed,
+      runState: strategy?.runState ?? 'UNKNOWN',
+    },
+
+    cadence: {
+      xScanSeconds: app.ops.xScanIntervalSeconds,
+      xEventWatchSeconds: app.ops.xEventWatchIntervalSeconds,
+      xPressureSeconds: app.ops.xApiPressureIntervalSeconds,
+      positionMonitorSeconds: app.ops.positionMonitorIntervalSeconds,
+      reconciliationSeconds: app.ops.reconciliationIntervalSeconds,
+      sameTickerCooldownMinutes: app.ops.sameTickerCooldownMinutes,
+      signalTtlMinutes: app.ops.signalTtlMinutes,
+      estimatedDailyXRequests: estimateDailyXRequests(app.ops, { queriesPerScan: 1, hoursActive: 6.5 }).requests,
+    },
+
+    api: app.apiMeter.today().map((u) => {
+      const pressure = app.apiMeter.underPressure(u.provider as 'x');
+      return {
+        provider: u.provider,
+        requests: u.requests,
+        successes: u.successes,
+        rateLimited: u.rateLimited,
+        errors: u.unauthorized + u.forbidden + u.timeouts + u.serverErrors + u.otherErrors,
+        lastSuccessAt: u.lastSuccessAt,
+        minutesSinceSuccess: u.minutesSinceSuccess,
+        lastErrorAt: u.lastErrorAt,
+        lastErrorKind: u.lastErrorKind,
+        lastErrorDetail: u.lastErrorDetail,
+        rateLimitRemaining: u.rateLimitRemaining,
+        rateLimitLimit: u.rateLimitLimit,
+        rateLimitResetAt: u.rateLimitResetAt,
+        softCapUsedPct: u.softCapUsedPct,
+        pressured: pressure.pressured,
+        pressureReason: pressure.reason,
+      };
+    }),
+
+    eventWatch: polling.watching,
+
+    funnel: {
+      stages: funnel.stages,
+      stalledAt: funnel.stalledAt,
+      narrative: funnel.narrative,
+    },
+
+    feed: buildFeed(app),
   };
+}
+
+/**
+ * The raw X side, annotated with what the pipeline decided about each post.
+ *
+ * This is the panel that answers "the bot saw this post — why did nothing
+ * happen?" without opening the database. Every post carries its filter verdict
+ * and reasons, so a silent day is legible rather than mysterious.
+ */
+function buildFeed(app: NorthstarApp): ObservabilityPayload['feed'] {
+  const events = app.store.events.recent(40);
+  const signals = app.store.signals.recent(100);
+
+  const signalByEvent = new Map<string, { signalId: string; score: number }>();
+  for (const signal of signals) {
+    for (const eventId of signal.triggeringEventIds) {
+      if (!signalByEvent.has(eventId)) signalByEvent.set(eventId, { signalId: signal.signalId, score: signal.score });
+    }
+  }
+
+  return events.map((e) => {
+    const filter = app.store.filters.byEvent(e.eventId);
+    const signal = signalByEvent.get(e.eventId) ?? null;
+    return {
+      postId: e.postId,
+      handle: e.authorHandle,
+      tier: `T${e.sourceTier}`,
+      postedAt: e.postedAt,
+      capturedAt: e.capturedAt,
+      text: e.text.length > 240 ? `${e.text.slice(0, 237)}…` : e.text,
+      url: e.url,
+      verdict: filter?.verdict ?? null,
+      verdictReasons: filter?.reasons ?? [],
+      resolvedTickers: app.store.resolutions.byEvent(e.eventId).map((r) => r.ticker),
+      signalId: signal?.signalId ?? null,
+      signalScore: signal?.score ?? null,
+    };
+  });
 }

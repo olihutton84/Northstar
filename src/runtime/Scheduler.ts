@@ -30,6 +30,7 @@ import type { ApiMeter } from './ApiMeter.js';
 import type { PollingPolicy } from './PollingPolicy.js';
 import type { CycleReport, MonitorReport, StrategyRunner } from './StrategyRunner.js';
 import type { ReconciliationService } from './Reconciliation.js';
+import type { SessionWatch } from './SessionWatch.js';
 
 export type SchedulerTask = 'X_SCAN' | 'POSITION_MONITOR' | 'RECONCILE';
 
@@ -48,6 +49,8 @@ export interface SchedulerOptions {
   ops: OperationsConfig;
   clock: Clock;
   logger: Logger;
+  /** Watches for the open and the close. Optional in tests and replay. */
+  session?: SessionWatch | null;
   /** Called after every task, for the CLI line and the dashboard. */
   onEvent?: (event: SchedulerEvent) => void;
   /** Stop after this many X scans. Used by tests and `--cycles`. */
@@ -65,6 +68,7 @@ export interface SchedulerStatus {
   lastReconcileAt: string | null;
   nextScanInSeconds: number | null;
   polling: ReturnType<PollingPolicy['status']>;
+  session: ReturnType<SessionWatch['status']> | null;
 }
 
 export class Scheduler {
@@ -165,6 +169,13 @@ export class Scheduler {
   private async scanOnce(): Promise<CycleReport | null> {
     this.scans += 1;
     try {
+      // Checked before the scan, not after: a scan that straddles the open
+      // should be priced on session data, not on the pre-market cache.
+      const transition = await this.o.session?.tick();
+      if (transition) {
+        this.emit('X_SCAN', `market ${transition.from} → ${transition.to}`, { ...transition });
+      }
+
       const report = await this.o.runner.runCycle();
       this.lastScanAt = report.finishedAt;
 
@@ -205,6 +216,10 @@ export class Scheduler {
   private async monitorOnce(): Promise<MonitorReport | null> {
     this.monitors += 1;
     try {
+      // The position loop also ticks the session watch, so the end-of-day
+      // report still fires on a day the X scan is backing off.
+      await this.o.session?.tick();
+
       const report = await this.o.runner.monitorPositions();
       this.lastMonitorAt = report.finishedAt;
       this.emit(
@@ -257,6 +272,8 @@ export class Scheduler {
     this.stopRequested = false;
     this.startedAt = this.o.clock.nowIso();
 
+    this.o.session?.prime();
+
     this.log.info('scheduler started', {
       xScanSeconds: this.o.ops.xScanIntervalSeconds,
       positionMonitorSeconds: this.o.ops.positionMonitorIntervalSeconds,
@@ -306,6 +323,7 @@ export class Scheduler {
       lastReconcileAt: this.lastReconcileAt,
       nextScanInSeconds: this.running ? this.o.polling.nextIntervalSeconds() : null,
       polling: this.o.polling.status(),
+      session: this.o.session?.status() ?? null,
     };
   }
 

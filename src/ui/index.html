@@ -35,6 +35,14 @@
     <div id="halt-banner" class="banner hidden"></div>
   </section>
 
+  <section class="panel" id="ops-panel">
+    <div class="panel-head">
+      <h2>Right Now</h2>
+      <span class="panel-note" id="ops-note"></span>
+    </div>
+    <div id="ops-body"></div>
+  </section>
+
   <section class="panel" id="health-panel">
     <div class="panel-head">
       <h2>System Health</h2>
@@ -126,6 +134,39 @@
       <div id="source-analytics"></div>
     </section>
   </div>
+
+  <div class="two-col">
+    <section class="panel" id="api-panel">
+      <div class="panel-head">
+        <h2>API Usage Today</h2>
+        <span class="panel-note">Request counts and rate-limit headroom. No credential is ever recorded here.</span>
+      </div>
+      <div id="api-body"></div>
+    </section>
+
+    <section class="panel" id="funnel-panel">
+      <div class="panel-head">
+        <h2>Today's Funnel</h2>
+        <span class="panel-note">A funnel that narrows to zero is a normal outcome, not a fault.</span>
+      </div>
+      <div id="funnel-body"></div>
+    </section>
+  </div>
+
+  <section class="panel" id="xfeed-panel">
+    <div class="panel-head">
+      <h2>Live X Feed</h2>
+      <span class="panel-note" id="xfeed-note">Every post the bot ingested, and what the pipeline decided about it.</span>
+    </div>
+    <div class="table-scroll">
+      <table class="grid" id="xfeed-table">
+        <thead><tr>
+          <th>Time</th><th>Source</th><th>Post</th><th>Verdict</th><th>Resolved</th><th>Signal</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
 
   <section class="panel">
     <div class="panel-head"><h2>Risk</h2><span class="panel-note" id="risk-note"></span></div>

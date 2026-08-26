@@ -72,6 +72,7 @@ async function load() {
 
 function render() {
   renderHeader();
+  renderOps();
   renderHealth();
   renderStats();
   renderChart();
@@ -83,7 +84,145 @@ function render() {
   renderPerformance();
   renderSources();
   renderRisk();
+  renderApi();
+  renderFunnel();
+  renderXFeed();
   $('#generated-at').textContent = `Generated ${time(state.generatedAt)}`;
+}
+
+/* ---------------------------------------------------------------- ops */
+
+/**
+ * Above the fold.
+ *
+ * These are the fields an operator needs to answer "is it working and is it
+ * safe?" without scrolling. Everything else on the page is detail behind one
+ * of these cells.
+ */
+function renderOps() {
+  const body = $('#ops-body');
+  if (!health || !health.summary) {
+    body.innerHTML = '<div class="empty">Observability endpoint unavailable.</div>';
+    return;
+  }
+
+  const s = health.summary;
+  const c = health.cadence;
+
+  $('#ops-note').textContent =
+    `X scan ${c.xScanSeconds}s · positions ${c.positionMonitorSeconds}s · reconcile ${c.reconciliationSeconds}s · ` +
+    `~${c.estimatedDailyXRequests} X requests per trading day`;
+
+  const pollTone = s.pollingState === 'API_PRESSURE' ? 'bad' : s.pollingState === 'EVENT_WATCH' ? 'warn' : 'ok';
+  const budgetPct = s.xRequestBudget > 0 ? Math.round((s.xRequestsToday / s.xRequestBudget) * 100) : 0;
+
+  const watching = (health.eventWatch || [])
+    .map((w) => `${w.ticker} (${w.minutesLeft}m)`)
+    .join(', ');
+
+  body.innerHTML = `<div class="health-grid">
+    ${cell('Connected', s.connected ? 'YES' : 'NO', s.connected ? 'ok' : 'warn', s.connectedDetail)}
+    ${cell('Polling', s.pollingState, pollTone, s.pollingReason)}
+    ${cell('Next X scan', `${s.nextScanSeconds}s`, '', watching ? `watching ${watching}` : 'baseline cadence')}
+    ${cell('Last X scan', ago(s.minutesSinceLastScan), staleTone(s.minutesSinceLastScan, health.process.uptimeMinutes, 10, 30),
+      s.lastScanAt ? time(s.lastScanAt) : 'no scan yet this process')}
+
+    ${cell('Newest post seen', ago(s.minutesSinceLastPost), '',
+      s.lastPostSeenAt ? time(s.lastPostSeenAt) : 'no posts stored')}
+    ${cell('X requests today', `${s.xRequestsToday} / ${s.xRequestBudget}`,
+      budgetPct >= 100 ? 'bad' : budgetPct >= 75 ? 'warn' : 'ok', `${budgetPct}% of the soft daily cap`)}
+    ${cell('Trades today', String(s.tradesToday), '',
+      s.tradesToday === 0 ? 'zero trades is a valid day' : 'entry orders submitted')}
+    ${cell('Open positions', String(s.openPositions), '', `equity ${s.equity}`)}
+    ${cell('US market', s.marketOpen ? 'OPEN' : 'CLOSED', s.marketOpen ? 'ok' : '', s.marketReason || '')}
+
+    ${cell('Run state', s.runState, s.runState === 'RUNNING' ? 'ok' : s.runState === 'KILLED' ? 'bad' : 'warn',
+      health.strategy.haltReason || 'no halt reason')}
+    ${cell('Kill switch', s.killSwitch ? 'ENGAGED' : 'ARMED', s.killSwitch ? 'bad' : 'ok', s.killSwitch ? 'no new orders' : 'ready')}
+    ${cell('Same-ticker cooldown', `${c.sameTickerCooldownMinutes}m`, '', 'minimum gap between entries in one name')}
+    ${cell('Signal TTL', `${c.signalTtlMinutes}m`, '', 're-checked immediately before every order')}
+  </div>`;
+}
+
+/* ---------------------------------------------------------------- api */
+
+function renderApi() {
+  const body = $('#api-body');
+  if (!health || !health.api) {
+    body.innerHTML = '<div class="empty">No API telemetry.</div>';
+    return;
+  }
+
+  body.innerHTML = health.api.map((a) => {
+    const tone = a.pressured ? 'bad' : a.errors > 0 ? 'warn' : 'ok';
+    const headroom = a.rateLimitRemaining === null
+      ? 'not advertised'
+      : `${a.rateLimitRemaining}/${a.rateLimitLimit ?? '?'} left${a.rateLimitResetAt ? `, resets ${time(a.rateLimitResetAt)}` : ''}`;
+    return `<div class="health-cell ${tone}" style="margin-bottom:8px">
+      <div class="k">${esc(a.provider.toUpperCase())}</div>
+      <div class="v">${a.requests} requests · ${a.successes} ok · ${a.rateLimited} rate-limited · ${a.errors} errors</div>
+      <div class="s">last success ${ago(a.minutesSinceSuccess)} · headroom ${esc(headroom)}${
+        a.softCapUsedPct === null ? '' : ` · ${a.softCapUsedPct}% of daily budget`}</div>
+      ${a.lastErrorAt ? `<div class="s">last error ${esc(a.lastErrorKind || '')}: ${esc(a.lastErrorDetail || '')}</div>` : ''}
+      ${a.pressured ? `<div class="s">UNDER PRESSURE — ${esc(a.pressureReason)}</div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+/* ------------------------------------------------------------- funnel */
+
+function renderFunnel() {
+  const body = $('#funnel-body');
+  if (!health || !health.funnel) {
+    body.innerHTML = '<div class="empty">No funnel data.</div>';
+    return;
+  }
+
+  const stages = health.funnel.stages;
+  const top = Math.max(1, ...stages.map((s) => s.count));
+
+  body.innerHTML = `<div class="funnel">${stages.map((s) => {
+    const pct = Math.round((s.count / top) * 100);
+    const stalled = health.funnel.stalledAt === s.stage;
+    return `<div class="funnel-row${stalled ? ' funnel-stalled' : ''}" title="${esc(s.meaning)}">
+      <div class="funnel-label">${esc(s.stage)}</div>
+      <div class="funnel-bar"><div class="funnel-fill" style="width:${pct}%"></div></div>
+      <div class="funnel-count">${s.count}</div>
+    </div>`;
+  }).join('')}</div>
+  <div class="s" style="margin-top:10px">${esc(health.funnel.narrative)}</div>`;
+}
+
+/* ------------------------------------------------------------ X feed */
+
+function renderXFeed() {
+  const tbody = $('#xfeed-table tbody');
+  const feed = (health && health.feed) || [];
+
+  $('#xfeed-note').textContent = feed.length === 0
+    ? 'No posts ingested yet.'
+    : `${feed.length} most recent posts, with the pipeline's decision on each.`;
+
+  if (feed.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">Nothing ingested yet.</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = feed.map((f) => {
+    const verdictClass = f.verdict === 'ACCEPT' ? 'chip-good'
+      : f.verdict === 'DOWNWEIGHT' ? 'chip-warn'
+      : f.verdict === 'REJECT' ? 'chip-bad' : '';
+    const reasons = f.verdictReasons.length ? f.verdictReasons.join(', ') : '';
+    return `<tr>
+      <td class="mono">${esc(time(f.capturedAt))}</td>
+      <td>@${esc(f.handle)} <span class="chip">${esc(f.tier)}</span></td>
+      <td class="feed-text" title="${esc(f.text)}">${esc(f.text)}</td>
+      <td><span class="chip ${verdictClass}">${esc(f.verdict || 'PENDING')}</span>${
+        reasons ? `<div class="s">${esc(reasons)}</div>` : ''}</td>
+      <td class="mono">${esc(f.resolvedTickers.join(', ') || '—')}</td>
+      <td class="mono">${f.signalScore === null ? '—' : (f.signalScore > 0 ? `+${f.signalScore}` : f.signalScore)}</td>
+    </tr>`;
+  }).join('');
 }
 
 /* ------------------------------------------------------------- health */

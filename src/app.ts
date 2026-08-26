@@ -61,6 +61,7 @@ import { PollingPolicy } from './runtime/PollingPolicy.js';
 import { ReadinessService } from './runtime/Readiness.js';
 import { ReconciliationService } from './runtime/Reconciliation.js';
 import { Scheduler } from './runtime/Scheduler.js';
+import { SessionWatch } from './runtime/SessionWatch.js';
 import { SignalAuditService } from './runtime/SignalAudit.js';
 import { StrategyRunner } from './runtime/StrategyRunner.js';
 import { UniverseRegistry } from './universe/UniverseRegistry.js';
@@ -122,6 +123,7 @@ export class NorthstarApp {
   readonly reconciliation: ReconciliationService;
   readonly readiness: ReadinessService;
   readonly scheduler: Scheduler;
+  readonly session: SessionWatch;
   readonly funnel: FunnelService;
   readonly dailyReport: DailyReportService;
 
@@ -304,6 +306,19 @@ export class NorthstarApp {
       onSignal: (signal) => this.polling.watch(signal.ticker, signal.score),
     });
 
+    this.session = new SessionWatch({
+      clock: this.clock,
+      logger: this.logger,
+      ops: this.ops,
+      // Dropping the price cache at the open is what stops a pre-market mark
+      // from pricing the first session trade.
+      onOpen: () => this.marketDataCache?.clear(),
+      onEndOfDay: (day) => {
+        this.logger.child('eod').info('end-of-day report', { day });
+        process.stdout.write(`\n${this.dailyReport.render(this.dailyReport.build(day))}\n`);
+      },
+    });
+
     this.scheduler = new Scheduler({
       runner: this.runner,
       reconciliation: this.reconciliation,
@@ -312,6 +327,7 @@ export class NorthstarApp {
       ops: this.ops,
       clock: this.clock,
       logger: this.logger,
+      session: this.session,
     });
   }
 
