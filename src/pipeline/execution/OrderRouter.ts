@@ -48,6 +48,16 @@ export interface OrderRouterOptions {
   logger: Logger;
   /** Percent price drift that invalidates an approved proposal. */
   priceDriftTolerancePct?: number;
+  /**
+   * Maximum age of the SIGNAL at the moment of submission.
+   *
+   * Distinct from proposal expiry: a proposal can be minutes old while the
+   * evidence behind it is hours old, and in LIVE mode a human may approve long
+   * after the story stopped being news. The last thing checked before a broker
+   * call is therefore whether the reason for the trade is still current.
+   * Omitted leaves the check off (tests, replay).
+   */
+  signalTtlMinutes?: number | null;
   /** Require human approval for LIVE exits too. Off by default; see above. */
   requireApprovalForLiveExits?: boolean;
 }
@@ -58,7 +68,18 @@ type LiveGateResult =
 
 export type SubmitOutcome =
   | { ok: true; order: Order }
-  | { ok: false; reason: 'RISK_REJECTED' | 'EXPIRED' | 'INVALIDATED' | 'NO_APPROVAL' | 'BROKER_ERROR' | 'DUPLICATE'; detail: string };
+  | {
+      ok: false;
+      reason:
+        | 'RISK_REJECTED'
+        | 'EXPIRED'
+        | 'SIGNAL_EXPIRED'
+        | 'INVALIDATED'
+        | 'NO_APPROVAL'
+        | 'BROKER_ERROR'
+        | 'DUPLICATE';
+      detail: string;
+    };
 
 export class OrderRouter {
   private readonly store: Store;
@@ -69,6 +90,7 @@ export class OrderRouter {
   private readonly log: Logger;
   private readonly driftTolerancePct: number;
   private readonly requireApprovalForLiveExits: boolean;
+  private readonly signalTtlMinutes: number | null;
 
   constructor(opts: OrderRouterOptions) {
     this.store = opts.store;
@@ -79,6 +101,7 @@ export class OrderRouter {
     this.log = opts.logger.child('order-router');
     this.driftTolerancePct = opts.priceDriftTolerancePct ?? 1.0;
     this.requireApprovalForLiveExits = opts.requireApprovalForLiveExits ?? false;
+    this.signalTtlMinutes = opts.signalTtlMinutes ?? null;
   }
 
   get mode(): TradingMode {
@@ -108,6 +131,24 @@ export class OrderRouter {
       this.store.proposals.setStatus(proposal.proposalId, 'EXPIRED');
       this.logDecision(proposal, 'ORDER', 'Proposal expired before submission', { expiresAt: proposal.expiresAt });
       return { ok: false, reason: 'EXPIRED', detail: `Proposal expired at ${proposal.expiresAt}` };
+    }
+
+    /* -------- 2b. the EVIDENCE must still be current --------------------- */
+    if (this.signalTtlMinutes !== null) {
+      const ageMinutes = (this.clock.nowMs() - new Date(signal.generatedAt).getTime()) / 60_000;
+      if (ageMinutes > this.signalTtlMinutes) {
+        this.store.proposals.setStatus(proposal.proposalId, 'EXPIRED');
+        const detail =
+          `Signal ${signal.signalId} is ${ageMinutes.toFixed(1)}m old, past the ` +
+          `${this.signalTtlMinutes}m TTL; the evidence is no longer current`;
+        this.logDecision(proposal, 'ORDER', `Signal expired before submission: ${detail}`, {
+          signalId: signal.signalId,
+          signalGeneratedAt: signal.generatedAt,
+          ageMinutes: Number(ageMinutes.toFixed(2)),
+          ttlMinutes: this.signalTtlMinutes,
+        });
+        return { ok: false, reason: 'SIGNAL_EXPIRED', detail };
+      }
     }
 
     /* -------- 3. the terms must still be the terms ---------------------- */

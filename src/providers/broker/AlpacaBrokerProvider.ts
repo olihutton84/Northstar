@@ -12,6 +12,7 @@ import type { Clock, Logger } from '../../core/index.js';
 import { centsToDollars } from '../../core/index.js';
 import type { TradingMode } from '../../domain/types.js';
 import type { AlpacaCredentials } from '../../config/env.js';
+import { ApiMeter, parseRateLimitHeaders } from '../../runtime/ApiMeter.js';
 import type {
   BrokerAccount,
   BrokerAsset,
@@ -65,6 +66,8 @@ export interface AlpacaBrokerOptions {
   logger: Logger;
   fetchImpl?: typeof fetch;
   requestTimeoutMs?: number;
+  /** Telemetry sink. Receives method, path and status only — never a key. */
+  meter?: ApiMeter | null;
 }
 
 export class AlpacaBrokerProvider implements BrokerProvider {
@@ -78,6 +81,7 @@ export class AlpacaBrokerProvider implements BrokerProvider {
   private readonly log: Logger;
   private readonly doFetch: typeof fetch;
   private readonly timeoutMs: number;
+  private readonly meter: ApiMeter | null;
 
   constructor(opts: AlpacaBrokerOptions) {
     const c = opts.credentials;
@@ -99,6 +103,7 @@ export class AlpacaBrokerProvider implements BrokerProvider {
     this.log = opts.logger.child(`alpaca:${c.mode.toLowerCase()}`);
     this.doFetch = opts.fetchImpl ?? fetch;
     this.timeoutMs = opts.requestTimeoutMs ?? 15_000;
+    this.meter = opts.meter ?? null;
   }
 
   async healthCheck(): Promise<{ healthy: boolean; detail: string }> {
@@ -290,10 +295,21 @@ export class AlpacaBrokerProvider implements BrokerProvider {
         signal: controller.signal,
       });
     } catch (e) {
+      const aborted = controller.signal.aborted;
+      this.meter?.record('alpaca', aborted ? 'TIMEOUT' : 'OTHER_ERROR', `${method} ${path}: ${aborted ? 'timeout' : 'network error'}`);
       throw new BrokerError(`Alpaca request failed: ${e instanceof Error ? e.message : String(e)}`, 'NETWORK', true);
     } finally {
       clearTimeout(timer);
     }
+
+    // Status codes and rate-limit headers only. The key and secret live in the
+    // request headers above and never leave this method.
+    this.meter?.record(
+      'alpaca',
+      ApiMeter.outcomeForStatus(res.status),
+      res.ok ? null : `${method} ${path} -> ${res.status}`,
+      parseRateLimitHeaders(res.headers, this.clock),
+    );
 
     if (res.status === 401 || res.status === 403) throw new BrokerError('Alpaca authentication failed', 'AUTH');
     if (res.status === 404) throw new BrokerError('Alpaca resource not found', 'NOT_FOUND');

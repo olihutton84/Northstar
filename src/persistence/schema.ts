@@ -9,7 +9,7 @@
  * caused it. Nothing is updated destructively except mutable working state
  * (position marks, order status, ledger cash); every decision is append-only.
  */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export const SCHEMA_SQL = `
 PRAGMA journal_mode = WAL;
@@ -387,6 +387,39 @@ CREATE TABLE IF NOT EXISTS health_incidents (
   resolved_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_incidents_open ON health_incidents(strategy_id, resolved_at);
+
+-- ------------------------------------------------------ api telemetry
+-- Durable per-day counters, so a restart does not reset today's usage and the
+-- morning's request budget is still legible in the afternoon.
+CREATE TABLE IF NOT EXISTS api_usage (
+  provider        TEXT NOT NULL,
+  day             TEXT NOT NULL,
+  requests        INTEGER NOT NULL DEFAULT 0,
+  successes       INTEGER NOT NULL DEFAULT 0,
+  unauthorized    INTEGER NOT NULL DEFAULT 0,
+  forbidden       INTEGER NOT NULL DEFAULT 0,
+  rate_limited    INTEGER NOT NULL DEFAULT 0,
+  timeouts        INTEGER NOT NULL DEFAULT 0,
+  server_errors   INTEGER NOT NULL DEFAULT 0,
+  other_errors    INTEGER NOT NULL DEFAULT 0,
+  last_success_at TEXT,
+  last_error_at   TEXT,
+  last_error_kind TEXT,
+  last_error_detail TEXT,
+  rate_limit_remaining INTEGER,
+  rate_limit_limit     INTEGER,
+  rate_limit_reset_at  TEXT,
+  PRIMARY KEY (provider, day)
+);
+
+-- Polling cursors: the newest post id seen per query, so each scan asks for
+-- what is NEW rather than re-reading the same window.
+CREATE TABLE IF NOT EXISTS provider_cursors (
+  cursor_key   TEXT PRIMARY KEY,
+  value        TEXT NOT NULL,
+  observed_at  TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+);
 
 -- --------------------------------------------------- market data cache
 CREATE TABLE IF NOT EXISTS price_bars (

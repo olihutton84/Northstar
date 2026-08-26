@@ -9,6 +9,7 @@
 import type { Clock, Logger } from '../../core/index.js';
 import type { MarketCalendarStatus, PriceBar, Quote } from '../../domain/types.js';
 import type { PriceBarRepo } from '../../persistence/store.js';
+import { ApiMeter, parseRateLimitHeaders } from '../../runtime/ApiMeter.js';
 import { marketStatus } from './marketCalendar.js';
 import type { MarketDataProvider } from './MarketDataProvider.js';
 import { MarketDataError } from './MarketDataProvider.js';
@@ -23,6 +24,8 @@ export interface TiingoOptions {
   requestTimeoutMs?: number;
   /** A quote older than this many minutes is flagged stale. */
   staleAfterMinutes?: number;
+  /** Telemetry sink. Receives status codes only — never the API key. */
+  meter?: ApiMeter | null;
 }
 
 interface TiingoIexRow {
@@ -58,6 +61,7 @@ export class TiingoMarketDataProvider implements MarketDataProvider {
   private readonly doFetch: typeof fetch;
   private readonly timeoutMs: number;
   private readonly staleAfterMinutes: number;
+  private readonly meter: ApiMeter | null;
 
   constructor(opts: TiingoOptions) {
     if (!opts.apiKey) throw new Error('TiingoMarketDataProvider requires TIINGO_API_KEY.');
@@ -69,6 +73,7 @@ export class TiingoMarketDataProvider implements MarketDataProvider {
     this.doFetch = opts.fetchImpl ?? fetch;
     this.timeoutMs = opts.requestTimeoutMs ?? 15_000;
     this.staleAfterMinutes = opts.staleAfterMinutes ?? 30;
+    this.meter = opts.meter ?? null;
   }
 
   async healthCheck(): Promise<{ healthy: boolean; detail: string }> {
@@ -169,19 +174,38 @@ export class TiingoMarketDataProvider implements MarketDataProvider {
     return marketStatus(this.clock);
   }
 
+  /**
+   * The single outbound path to Tiingo.
+   *
+   * The token travels in the query string because that is Tiingo's scheme, so
+   * the URL itself is a credential: it is never logged, never metered and never
+   * put in an error message. Only the path, status code and rate-limit headers
+   * are recorded.
+   */
   private async request<T>(path: string): Promise<T> {
     const sep = path.includes('?') ? '&' : '?';
     const url = `${this.baseUrl}${path}${sep}token=${encodeURIComponent(this.apiKey)}`;
+    const endpoint = path.split('?')[0] ?? path;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     let res: Response;
     try {
       res = await this.doFetch(url, { headers: { accept: 'application/json' }, signal: controller.signal });
     } catch (e) {
+      const aborted = controller.signal.aborted;
+      this.meter?.record('tiingo', aborted ? 'TIMEOUT' : 'OTHER_ERROR', `${endpoint}: ${aborted ? 'timeout' : 'network error'}`);
       throw new MarketDataError(`Tiingo request failed: ${e instanceof Error ? e.message : String(e)}`, 'NETWORK');
     } finally {
       clearTimeout(timer);
     }
+
+    const rateLimit = parseRateLimitHeaders(res.headers, this.clock);
+    this.meter?.record(
+      'tiingo',
+      ApiMeter.outcomeForStatus(res.status),
+      res.ok ? null : `${endpoint} -> ${res.status}`,
+      rateLimit,
+    );
 
     if (res.status === 401 || res.status === 403) throw new MarketDataError('Tiingo auth failed', 'AUTH');
     if (res.status === 404) throw new MarketDataError('Tiingo resource not found', 'NOT_FOUND');

@@ -43,6 +43,9 @@ export interface FixtureSocialProviderOptions {
   batchId?: string;
 }
 
+/** Single-chunk cursor key; the fixture provider issues one logical query. */
+export const FIXTURE_CURSOR_KEY = 'x:chunk:0';
+
 export class FixtureSocialProvider implements SocialDataProvider {
   readonly platform = 'X' as const;
   readonly providerId = 'x-fixture';
@@ -140,15 +143,35 @@ export class FixtureSocialProvider implements SocialDataProvider {
     }
 
     events.sort((a, b) => a.postedAt.localeCompare(b.postedAt));
-    const limited = events.slice(0, query.limit);
+
+    // Honour the cursor exactly as the real provider does, so cursor handling
+    // is exercised offline rather than only against the live API.
+    //
+    // Fixture post ids are readable labels rather than ordered snowflakes, so
+    // the cursor is resolved POSITIONALLY: find the post it names and return
+    // what comes after it. A cursor naming a post that is no longer in the
+    // fixture returns everything, which is exactly what X does when `since_id`
+    // predates the whole result set.
+    const sinceId = query.sinceIds?.[FIXTURE_CURSOR_KEY];
+    const cursorIndex = sinceId === undefined ? -1 : events.findIndex((e) => e.postId === sinceId);
+    const fresh = cursorIndex >= 0 ? events.slice(cursorIndex + 1) : events;
+    const limited = fresh.slice(0, query.limit);
+
+    // The cursor advances only to a post actually returned. Advancing past
+    // posts that were truncated away would lose them permanently.
+    const newestIds: Record<string, string> = {};
+    const newest = limited.at(-1);
+    if (newest) newestIds[FIXTURE_CURSOR_KEY] = newest.postId;
 
     return {
       batchId,
       events: limited,
       authors: [...authors.values()],
       fetchedAt: capturedAt,
-      truncated: limited.length < events.length,
+      truncated: limited.length < fresh.length,
       rateLimitRemaining: null,
+      newestIds,
+      requestCount: 1,
     };
   }
 }

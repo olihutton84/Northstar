@@ -18,6 +18,7 @@ import {
   type CredentialReport,
   type NorthstarEnv,
 } from './config/env.js';
+import { loadOperations, type OperationsConfig } from './config/operations.js';
 import { getSignalConfig, type SignalEngineConfig } from './config/signalConfig.js';
 import {
   latestVersion,
@@ -43,6 +44,7 @@ import { TickerResolver } from './pipeline/tickerResolution.js';
 import { AlpacaBrokerProvider } from './providers/broker/AlpacaBrokerProvider.js';
 import type { BrokerProvider } from './providers/broker/BrokerProvider.js';
 import { SimulatedBrokerProvider } from './providers/broker/SimulatedBrokerProvider.js';
+import { CachingMarketDataProvider } from './providers/marketdata/CachingMarketDataProvider.js';
 import { FixtureMarketDataProvider } from './providers/marketdata/FixtureMarketDataProvider.js';
 import type { MarketDataProvider } from './providers/marketdata/MarketDataProvider.js';
 import { TiingoMarketDataProvider } from './providers/marketdata/TiingoMarketDataProvider.js';
@@ -50,8 +52,10 @@ import { FixtureSocialProvider } from './providers/social/FixtureSocialProvider.
 import type { SocialDataProvider } from './providers/social/SocialDataProvider.js';
 import { SourceRegistry } from './providers/social/sourceRegistry.js';
 import { XProvider } from './providers/social/XProvider.js';
+import { ApiMeter } from './runtime/ApiMeter.js';
 import { ApprovalService } from './runtime/ApprovalService.js';
 import { HealthGuard } from './runtime/HealthGuard.js';
+import { PollingPolicy } from './runtime/PollingPolicy.js';
 import { ReadinessService } from './runtime/Readiness.js';
 import { ReconciliationService } from './runtime/Reconciliation.js';
 import { SignalAuditService } from './runtime/SignalAudit.js';
@@ -70,6 +74,8 @@ export interface NorthstarAppOptions {
   broker?: BrokerProvider;
   databasePath?: string;
   strategySpec?: StrategyVersionSpec;
+  /** Override operational cadences (tests, replay). */
+  operations?: Partial<OperationsConfig>;
 }
 
 export class NorthstarApp {
@@ -81,11 +87,17 @@ export class NorthstarApp {
   readonly sourceRegistry: SourceRegistry;
   readonly spec: StrategyVersionSpec;
   readonly signalConfig: SignalEngineConfig;
+  readonly ops: OperationsConfig;
   readonly mode: TradingMode;
 
   readonly social: SocialDataProvider;
   readonly marketData: MarketDataProvider;
   readonly broker: BrokerProvider;
+  /** Non-null only when the market-data provider is wrapped for caching. */
+  readonly marketDataCache: CachingMarketDataProvider | null;
+
+  readonly apiMeter: ApiMeter;
+  readonly polling: PollingPolicy;
 
   readonly ledger: CapitalLedgerService;
   readonly health: HealthGuard;
@@ -116,6 +128,10 @@ export class NorthstarApp {
     const db = openDatabase(opts.databasePath ?? this.env.databasePath);
     this.store = new Store(db, this.clock);
 
+    this.ops = loadOperations(opts.operations);
+    this.apiMeter = new ApiMeter(this.store, this.clock, { x: this.ops.xDailyRequestSoftCap });
+    this.polling = new PollingPolicy(this.ops, this.clock, this.logger, this.apiMeter);
+
     this.spec = opts.strategySpec ?? latestVersion(X_STRATEGY_ID);
     this.signalConfig = getSignalConfig(this.spec.signalConfigId);
 
@@ -125,7 +141,20 @@ export class NorthstarApp {
     this.sourceRegistry = new SourceRegistry();
 
     /* ---------------------------------------------------- providers --- */
-    this.marketData = opts.marketData ?? this.buildMarketData();
+    // Injected providers (tests, replay) are used exactly as given; only the
+    // real vendor path is wrapped, so a test's provider stays observable.
+    const marketData = opts.marketData ?? this.buildMarketData();
+    this.marketDataCache =
+      opts.marketData === undefined && marketData.providerId === 'tiingo'
+        ? new CachingMarketDataProvider({
+            delegate: marketData,
+            clock: this.clock,
+            logger: this.logger,
+            quoteCacheSeconds: this.ops.quoteCacheSeconds,
+            historyRefreshMinutes: this.ops.historyRefreshMinutes,
+          })
+        : null;
+    this.marketData = this.marketDataCache ?? marketData;
     this.social = opts.social ?? this.buildSocial();
     this.broker = opts.broker ?? this.buildBroker(this.mode);
 
@@ -173,6 +202,7 @@ export class NorthstarApp {
       ledger: this.ledger,
       clock: this.clock,
       logger: this.logger,
+      signalTtlMinutes: this.ops.signalTtlMinutes,
     });
 
     this.positionManager = new PositionManager({
@@ -252,6 +282,8 @@ export class NorthstarApp {
       signalConfig: this.signalConfig,
       exitRules: this.spec.exitRules,
       strategyId: this.spec.strategyId,
+      ops: this.ops,
+      onSignal: (signal) => this.polling.watch(signal.ticker, signal.score),
     });
   }
 
@@ -348,6 +380,8 @@ export class NorthstarApp {
       clock: this.clock,
       logger: this.logger,
       registry: this.sourceRegistry,
+      meter: this.apiMeter,
+      maxResults: this.ops.xMaxResultsPerRequest,
     });
   }
 
@@ -364,6 +398,7 @@ export class NorthstarApp {
       clock: this.clock,
       logger: this.logger,
       bars: this.store.bars,
+      meter: this.apiMeter,
     });
   }
 
@@ -379,6 +414,7 @@ export class NorthstarApp {
         credentials: loadAlpacaCredentials('LIVE'),
         clock: this.clock,
         logger: this.logger,
+        meter: this.apiMeter,
       });
     }
 
@@ -397,6 +433,7 @@ export class NorthstarApp {
         credentials: loadAlpacaCredentials('PAPER'),
         clock: this.clock,
         logger: this.logger,
+        meter: this.apiMeter,
       });
     } catch (e) {
       throw new ConfigurationError(

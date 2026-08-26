@@ -384,6 +384,11 @@ export type RiskCheckId =
   | 'MARKET_HOURS'
   | 'DUPLICATE_EXPOSURE'
   | 'DUPLICATE_ORDER'
+  /* Operational gates: rate controls, not strategy thresholds. They are
+     configured by OperationsConfig rather than the frozen RiskLimits, so
+     tuning cadence never republishes a strategy version. */
+  | 'SAME_TICKER_COOLDOWN'
+  | 'SIGNAL_FRESHNESS'
   | 'MAX_CONCURRENT_POSITIONS'
   | 'MAX_POSITION_SIZE'
   | 'AVAILABLE_CASH'

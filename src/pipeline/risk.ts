@@ -41,6 +41,25 @@ export interface RiskContext {
   providerHealthDetail: string;
   /** Overrides the calendar when the broker is authoritative (paper/live). */
   brokerReportsMarketOpen?: boolean | null;
+  /**
+   * Operational rate controls, supplied by OperationsConfig.
+   *
+   * These are deliberately NOT part of the frozen RiskLimits: they govern how
+   * fast the bot may act, not what it considers tradable evidence. Passing them
+   * through the context keeps `x-signal-v1`'s risk limits byte-identical while
+   * still recording the outcome in the risk decision, where the audit trail
+   * can see it.
+   *
+   * Absent means the gate is not enforced (replay and unit tests).
+   */
+  operational?: {
+    /** Minimum minutes between two ENTRY attempts in the same ticker. */
+    sameTickerCooldownMinutes: number;
+    /** When this strategy last attempted an entry in this ticker. */
+    lastEntryAt: string | null;
+    /** A signal older than this may no longer produce an order. */
+    signalTtlMinutes: number;
+  };
 }
 
 export class RiskEngine {
@@ -229,6 +248,48 @@ export class RiskEngine {
       !duplicateOrder,
       duplicateOrder ? 'An order already exists for this proposal' : 'No prior order for this proposal',
     );
+
+    /* ------------------------------------------- operational rate gates */
+
+    if (ctx.operational) {
+      const { sameTickerCooldownMinutes, lastEntryAt, signalTtlMinutes } = ctx.operational;
+
+      // Same-ticker cooldown. One story usually produces a burst of posts; the
+      // cooldown means the bot acts on the story once and then waits, rather
+      // than compounding into the same name as the burst continues.
+      const minutesSinceEntry =
+        lastEntryAt === null ? Infinity : (this.clock.nowMs() - new Date(lastEntryAt).getTime()) / 60_000;
+      const cooledDown = minutesSinceEntry >= sameTickerCooldownMinutes;
+      add(
+        'SAME_TICKER_COOLDOWN',
+        cooledDown,
+        cooledDown
+          ? lastEntryAt === null
+            ? `No prior entry in ${proposal.ticker}`
+            : `Last ${proposal.ticker} entry was ${minutesSinceEntry.toFixed(1)}m ago, past the ` +
+              `${sameTickerCooldownMinutes}m cooldown`
+          : `${proposal.ticker} was entered ${minutesSinceEntry.toFixed(1)}m ago; the ` +
+            `${sameTickerCooldownMinutes}m same-ticker cooldown has not elapsed`,
+        minutesSinceEntry === Infinity ? undefined : minutesSinceEntry,
+        sameTickerCooldownMinutes,
+      );
+
+      // Signal freshness. Re-checked here rather than only at generation time,
+      // because the gap between "signal produced" and "order submitted" is
+      // exactly where a stale thesis would otherwise slip through.
+      const signalAgeMinutes = (this.clock.nowMs() - new Date(ctx.signal.generatedAt).getTime()) / 60_000;
+      const fresh = signalAgeMinutes <= signalTtlMinutes;
+      add(
+        'SIGNAL_FRESHNESS',
+        fresh,
+        fresh
+          ? `Signal is ${signalAgeMinutes.toFixed(1)}m old, within the ${signalTtlMinutes}m TTL`
+          : `Signal is ${signalAgeMinutes.toFixed(1)}m old, past the ${signalTtlMinutes}m TTL; ` +
+            'the evidence is no longer current enough to act on',
+        signalAgeMinutes,
+        signalTtlMinutes,
+      );
+    }
 
     const positionsOk = ctx.openPositions.length < limits.maxConcurrentPositions;
     add(

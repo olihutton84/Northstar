@@ -21,6 +21,7 @@ import type {
 } from './SocialDataProvider.js';
 import { SocialProviderError } from './SocialDataProvider.js';
 import { SourceRegistry, normaliseHandle } from './sourceRegistry.js';
+import { ApiMeter, parseRateLimitHeaders } from '../../runtime/ApiMeter.js';
 
 export interface XProviderOptions {
   bearerToken: string;
@@ -33,6 +34,10 @@ export interface XProviderOptions {
   /** Max query length X accepts for the recent-search endpoint. */
   maxQueryLength?: number;
   requestTimeoutMs?: number;
+  /** Records every request's outcome and rate-limit headroom. */
+  meter?: ApiMeter | null;
+  /** Posts requested per search request. */
+  maxResults?: number;
 }
 
 interface XUser {
@@ -65,8 +70,13 @@ interface XTweet {
 interface XSearchResponse {
   data?: XTweet[];
   includes?: { users?: XUser[] };
-  meta?: { result_count?: number; next_token?: string };
+  meta?: { result_count?: number; next_token?: string; newest_id?: string; oldest_id?: string };
   errors?: { title?: string; detail?: string }[];
+}
+
+/** Stable cursor key for one batched query chunk. */
+export function chunkCursorKey(index: number): string {
+  return `x:chunk:${index}`;
 }
 
 export class XProvider implements SocialDataProvider {
@@ -81,6 +91,10 @@ export class XProvider implements SocialDataProvider {
   private readonly doFetch: typeof fetch;
   private readonly maxQueryLength: number;
   private readonly timeoutMs: number;
+  private readonly meter: ApiMeter | null;
+  private readonly maxResults: number;
+  /** Requests made by the most recent fetch, for cadence accounting. */
+  lastRequestCount = 0;
 
   constructor(opts: XProviderOptions) {
     if (!opts.bearerToken) throw new Error('XProvider requires a bearer token (X_BEARER_TOKEN).');
@@ -92,6 +106,8 @@ export class XProvider implements SocialDataProvider {
     this.doFetch = opts.fetchImpl ?? fetch;
     this.maxQueryLength = opts.maxQueryLength ?? 1024;
     this.timeoutMs = opts.requestTimeoutMs ?? 15_000;
+    this.meter = opts.meter ?? null;
+    this.maxResults = Math.min(100, Math.max(10, opts.maxResults ?? 100));
   }
 
   async healthCheck(): Promise<{ healthy: boolean; detail: string }> {
@@ -137,28 +153,53 @@ export class XProvider implements SocialDataProvider {
     return chunks;
   }
 
+  /**
+   * One scan.
+   *
+   * Costs exactly one request per batched query chunk. The universe is packed
+   * into as few OR-joined queries as the endpoint's length limit allows, so a
+   * 29-name universe is two or three requests, not twenty-nine.
+   *
+   * Each chunk carries its own `since_id` cursor, so the vendor returns only
+   * what is NEW since the last scan. A quiet two minutes therefore costs the
+   * requests and returns zero posts, rather than re-downloading the same window.
+   */
   async fetch(query: SocialQuery): Promise<SocialFetchResult> {
     const batchId = randomId('batch');
     const fetchedAt = this.clock.nowIso();
     const queries = this.buildQueries(query);
     const events: SocialEvent[] = [];
     const authorsById = new Map<string, SocialAuthor>();
+    const newestIds: Record<string, string> = {};
     let truncated = false;
     let rateLimitRemaining: number | null = null;
+    let requestCount = 0;
 
-    for (const q of queries) {
+    for (const [index, q] of queries.entries()) {
+      const chunkKey = chunkCursorKey(index);
+      const sinceId = query.sinceIds?.[chunkKey];
+
       const params = new URLSearchParams({
         query: q,
-        max_results: String(Math.min(100, Math.max(10, query.limit))),
-        start_time: query.since,
+        max_results: String(this.maxResults),
         'tweet.fields': 'created_at,public_metrics,lang,entities,referenced_tweets,author_id',
         'user.fields': 'username,name,verified,created_at,public_metrics',
         expansions: 'author_id',
       });
 
+      // since_id and start_time are mutually redundant; prefer the cursor,
+      // which is exact, and fall back to a time window only on a cold start.
+      if (sinceId) params.set('since_id', sinceId);
+      else params.set('start_time', query.since);
+
+      requestCount += 1;
       const { response, remaining } = await this.requestWithMeta(`/tweets/search/recent?${params.toString()}`);
       rateLimitRemaining = remaining;
       if (response.meta?.next_token) truncated = true;
+
+      // newest_id is what the next scan asks for posts after.
+      const newest = response.meta?.newest_id;
+      if (newest) newestIds[chunkKey] = newest;
 
       const users = new Map<string, XUser>();
       for (const u of response.includes?.users ?? []) users.set(u.id, u);
@@ -177,28 +218,27 @@ export class XProvider implements SocialDataProvider {
         authorsById.set(author.authorId, author);
         events.push(this.toSocialEvent(tweet, author, batchId, fetchedAt));
       }
-
-      if (events.length >= query.limit) {
-        truncated = truncated || events.length > query.limit;
-        break;
-      }
     }
 
-    this.log.info('x fetch complete', {
+    this.lastRequestCount = requestCount;
+    this.log.info('x scan complete', {
       batchId,
-      queries: queries.length,
+      requests: requestCount,
       events: events.length,
       truncated,
       rateLimitRemaining,
+      usedCursors: Object.keys(query.sinceIds ?? {}).length,
     });
 
     return {
       batchId,
-      events: events.slice(0, query.limit),
+      events,
       authors: [...authorsById.values()],
       fetchedAt,
       truncated,
       rateLimitRemaining,
+      newestIds,
+      requestCount,
     };
   }
 
@@ -262,20 +302,28 @@ export class XProvider implements SocialDataProvider {
       });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      const timedOut = /abort|timeout/i.test(msg);
+      this.meter?.record('x', timedOut ? 'TIMEOUT' : 'OTHER_ERROR', msg);
       throw new SocialProviderError(`X request failed: ${msg}`, 'NETWORK');
     } finally {
       clearTimeout(timer);
     }
 
-    const remainingHeader = res.headers.get('x-rate-limit-remaining');
-    const remaining = remainingHeader === null ? null : Number(remainingHeader);
+    const rateLimit = parseRateLimitHeaders(res.headers, this.clock);
+    const remaining = rateLimit.remaining ?? null;
+    this.meter?.record('x', ApiMeter.outcomeForStatus(res.status), res.ok ? null : `HTTP ${res.status}`, rateLimit);
 
     if (res.status === 401 || res.status === 403) {
       throw new SocialProviderError(`X authentication failed (${res.status})`, 'AUTH');
     }
     if (res.status === 429) {
       const resetHeader = res.headers.get('x-rate-limit-reset');
-      const retryAfter = resetHeader ? Math.max(0, Number(resetHeader) * 1000 - this.clock.nowMs()) / 1000 : 900;
+      const retryAfterHeader = res.headers.get('retry-after');
+      const retryAfter = retryAfterHeader
+        ? Number(retryAfterHeader)
+        : resetHeader
+          ? Math.max(0, Number(resetHeader) * 1000 - this.clock.nowMs()) / 1000
+          : 900;
       throw new SocialProviderError('X rate limit exceeded', 'RATE_LIMIT', retryAfter);
     }
     if (res.status >= 500) {

@@ -6,6 +6,13 @@
  * raw normalised event before any scoring is what makes historical signals
  * reproducible: the signal engine can be re-run over stored events months later
  * and must produce the same numbers.
+ *
+ * Ingestion is CURSOR-DRIVEN. The newest post id seen per query chunk is
+ * persisted, and the next poll asks the vendor for posts newer than it. Without
+ * that, every two-minute scan re-downloads the same window and pays for posts
+ * it has already stored — the duplicate count would carry the whole request
+ * budget. Cursors live in the database rather than in memory so a restart
+ * resumes where the last poll finished instead of re-reading the last hour.
  */
 import type { Clock, Logger } from '../core/index.js';
 import { randomId } from '../core/index.js';
@@ -14,13 +21,16 @@ import type { Store } from '../persistence/store.js';
 import type { SocialDataProvider } from '../providers/social/SocialDataProvider.js';
 import type { UniverseRegistry } from '../universe/UniverseRegistry.js';
 
+/** Every social cursor key is namespaced, so `all()` cannot pick up others. */
+const CURSOR_PREFIX = 'x:';
+
 export interface IngestionOptions {
   provider: SocialDataProvider;
   store: Store;
   universe: UniverseRegistry;
   clock: Clock;
   logger: Logger;
-  /** How far back each poll looks. */
+  /** How far back the FIRST poll looks, before any cursor exists. */
   lookbackMinutes?: number;
   /** Provider-side cap per poll. */
   limit?: number;
@@ -34,6 +44,10 @@ export interface IngestionResult {
   truncated: boolean;
   rateLimitRemaining: number | null;
   events: SocialEvent[];
+  /** Vendor requests this poll actually cost. */
+  requestCount: number;
+  /** True when the poll ran from a persisted cursor rather than a time window. */
+  usedCursor: boolean;
 }
 
 export class IngestionService {
@@ -59,7 +73,12 @@ export class IngestionService {
     const { tickers, keywords } = this.universe.searchTerms(sources);
     const since = new Date(this.clock.nowMs() - this.lookbackMinutes * 60_000).toISOString();
 
-    const result = await this.provider.fetch({ tickers, keywords, since, limit: this.limit });
+    // `since` remains as the cold-start bound; where a cursor exists the
+    // provider prefers it, so a restart never re-reads a whole window.
+    const sinceIds = this.store.cursors.all(CURSOR_PREFIX);
+    const usedCursor = Object.keys(sinceIds).length > 0;
+
+    const result = await this.provider.fetch({ tickers, keywords, since, limit: this.limit, sinceIds });
 
     let stored = 0;
     let duplicates = 0;
@@ -89,6 +108,13 @@ export class IngestionService {
       }
 
       this.updateAuthorBaselines(result.events);
+
+      // Cursors advance in the SAME transaction as the events they came from.
+      // A crash between the two would otherwise skip posts permanently: the
+      // cursor would say "seen" for events that were never stored.
+      for (const [key, value] of Object.entries(result.newestIds)) {
+        this.store.cursors.advance(key, value);
+      }
     });
 
     this.store.log.append({
@@ -106,10 +132,19 @@ export class IngestionService {
         tickerTerms: tickers.length,
         keywordTerms: keywords.length,
         since,
+        usedCursor,
+        requestCount: result.requestCount,
       },
     });
 
-    this.log.info('ingest complete', { batchId: result.batchId, stored, duplicates, truncated: result.truncated });
+    this.log.info('ingest complete', {
+      batchId: result.batchId,
+      stored,
+      duplicates,
+      truncated: result.truncated,
+      requests: result.requestCount,
+      usedCursor,
+    });
 
     return {
       batchId: result.batchId,
@@ -119,6 +154,8 @@ export class IngestionService {
       truncated: result.truncated,
       rateLimitRemaining: result.rateLimitRemaining,
       events: newEvents,
+      requestCount: result.requestCount,
+      usedCursor,
     };
   }
 

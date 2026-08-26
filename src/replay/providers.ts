@@ -32,6 +32,8 @@ import type { ReplayDataset } from './dataset.js';
 
 /* ------------------------------------------------------------- social --- */
 
+export const REPLAY_CURSOR_KEY = 'x:chunk:0';
+
 export class ReplaySocialProvider implements SocialDataProvider {
   readonly platform = 'X' as const;
   readonly providerId = 'x-replay';
@@ -65,6 +67,10 @@ export class ReplaySocialProvider implements SocialDataProvider {
       if (author) authors.push(author);
     }
 
+    const newestIds: Record<string, string> = {};
+    const newest = [...limited].sort((a, b) => a.capturedAt.localeCompare(b.capturedAt)).at(-1);
+    if (newest) newestIds[REPLAY_CURSOR_KEY] = newest.postId;
+
     return {
       batchId: `replay_batch_${++this.batch}`,
       // capturedAt is preserved from the dataset: the replay must reproduce the
@@ -74,6 +80,8 @@ export class ReplaySocialProvider implements SocialDataProvider {
       fetchedAt: nowIso,
       truncated: limited.length < visible.length,
       rateLimitRemaining: null,
+      newestIds,
+      requestCount: 1,
     };
   }
 

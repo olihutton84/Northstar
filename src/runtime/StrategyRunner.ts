@@ -21,6 +21,7 @@
  */
 import type { Clock, Logger } from '../core/index.js';
 import { randomId } from '../core/index.js';
+import type { OperationsConfig } from '../config/operations.js';
 import type { SignalEngineConfig } from '../config/signalConfig.js';
 import type { ExitRuleConfig } from '../config/strategyRegistry.js';
 import type {
@@ -75,6 +76,10 @@ export interface StrategyRunnerDeps {
   signalConfig: SignalEngineConfig;
   exitRules: ExitRuleConfig;
   strategyId: string;
+  /** Operational rate controls. Absent leaves the rate gates unenforced. */
+  ops?: OperationsConfig;
+  /** Put a security on event watch when a strong new signal lands. */
+  onSignal?: (signal: XSignal) => void;
 }
 
 export interface CycleReport {
@@ -86,8 +91,16 @@ export interface CycleReport {
   halted: boolean;
   haltReason: string | null;
   ingested: number;
+  /** Vendor requests this cycle's ingest actually cost. */
+  xRequests: number;
+  /** Posts the vendor returned, including ones already stored. */
+  postsReceived: number;
   filtered: { accepted: number; downweighted: number; rejected: number };
   resolutions: number;
+  /** Securities with recent evidence, before the new-evidence gate. */
+  candidates: number;
+  /** Candidates skipped because nothing new arrived for them this scan. */
+  candidatesWithoutNewEvidence: number;
   signalsGenerated: number;
   proposalsCreated: number;
   riskApproved: number;
@@ -129,8 +142,12 @@ export class StrategyRunner {
       halted: false,
       haltReason: null,
       ingested: 0,
+      xRequests: 0,
+      postsReceived: 0,
       filtered: { accepted: 0, downweighted: 0, rejected: 0 },
       resolutions: 0,
+      candidates: 0,
+      candidatesWithoutNewEvidence: 0,
       signalsGenerated: 0,
       proposalsCreated: 0,
       riskApproved: 0,
@@ -171,9 +188,15 @@ export class StrategyRunner {
     }
 
     /* ---------------------------------------------------- 1. ingest --- */
+    // Ids of events that arrived in THIS scan. Signal generation is gated on
+    // them: no new event, no new trade.
+    const newEventIds = new Set<string>();
     try {
       const ingest = await this.d.ingestion.ingest(strategy.universeSources, correlationId);
       report.ingested = ingest.stored;
+      report.xRequests = ingest.requestCount;
+      report.postsReceived = ingest.fetched;
+      for (const e of ingest.events) newEventIds.add(e.eventId);
       this.d.health.recordSuccess('social');
     } catch (e) {
       const detail = e instanceof Error ? e.message : String(e);
@@ -223,7 +246,29 @@ export class StrategyRunner {
 
     // Only tradable-confidence resolutions may seed a signal.
     const tradableResolutions = resolutions.filter((r) => this.d.resolver.isTradable(r));
-    const candidates = this.d.signalEngine.buildCandidates(recentEvents, filterResults, tradableResolutions);
+    const allCandidates = this.d.signalEngine.buildCandidates(recentEvents, filterResults, tradableResolutions);
+    report.candidates = allCandidates.length;
+
+    // EVENT-DRIVEN GATE.
+    //
+    // A candidate is only scored when at least one of its events is genuinely
+    // new to the bot — either it arrived in this scan, or it has never
+    // contributed to any signal. Without this, every scan re-scores the whole
+    // recent window and the passage of time alone eventually produces a trade.
+    // "No new event = no new trade" is enforced here, above the signal engine,
+    // so `x-signal-v1` itself is untouched.
+    const alreadySignalled = new Set<string>();
+    for (const s of this.d.store.signals.since(since)) {
+      for (const id of s.triggeringEventIds) alreadySignalled.add(id);
+    }
+    const candidates = allCandidates.filter((c) => {
+      const fresh = c.events.some((e) => newEventIds.has(e.eventId) || !alreadySignalled.has(e.eventId));
+      if (!fresh) {
+        report.candidatesWithoutNewEvidence += 1;
+        this.log.debug('no new evidence for candidate; not re-scoring', { ticker: c.ticker });
+      }
+      return fresh;
+    });
 
     const signals: XSignal[] = [];
     for (const candidate of candidates) {
@@ -254,6 +299,10 @@ export class StrategyRunner {
         // trade are graded later.
         const price = signal.priceConfirmationDetail?.lastPrice ?? 0;
         if (price > 0) this.d.forwardReturns.register(signal, price);
+
+        // A strong signal on genuinely new evidence is exactly when follow-up
+        // information arrives, so the poller speeds up for a short window.
+        this.d.onSignal?.(signal);
       } catch (e) {
         const detail = e instanceof Error ? e.message : String(e);
         report.errors.push(`signal ${candidate.ticker}: ${detail}`);
@@ -477,6 +526,15 @@ export class StrategyRunner {
         providersHealthy,
         providerHealthDetail: healthState.haltReason ?? 'healthy',
         brokerReportsMarketOpen: brokerOpen,
+        ...(this.d.ops
+          ? {
+              operational: {
+                sameTickerCooldownMinutes: this.d.ops.sameTickerCooldownMinutes,
+                lastEntryAt: this.d.store.orders.lastEntryAt(strategy.strategyId, security.ticker),
+                signalTtlMinutes: this.d.ops.signalTtlMinutes,
+              },
+            }
+          : {}),
       });
 
       this.d.store.risk.save(decision);

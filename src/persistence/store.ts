@@ -785,6 +785,23 @@ export class OrderRepo {
     return this.db.all('SELECT * FROM orders ORDER BY submitted_at DESC LIMIT ?', limit).map(OrderRepo.map);
   }
 
+  /**
+   * When this strategy last tried to ENTER a ticker, whatever came of it.
+   *
+   * Rejected and cancelled attempts count. The cooldown exists to bound how
+   * fast the bot acts on one developing story, and an attempt that failed at
+   * the broker still represents a decision to act on that story.
+   */
+  lastEntryAt(strategyId: string, ticker: string): string | null {
+    const r = this.db.get(
+      `SELECT MAX(submitted_at) AS last FROM orders
+        WHERE strategy_id = ? AND ticker = ? AND intent = 'ENTRY'`,
+      strategyId, ticker.toUpperCase(),
+    );
+    const value = r?.['last'];
+    return value === null || value === undefined ? null : String(value);
+  }
+
   all(): Order[] {
     return this.db.all('SELECT * FROM orders ORDER BY submitted_at').map(OrderRepo.map);
   }
@@ -1282,7 +1299,201 @@ export class PriceBarRepo {
   }
 }
 
+
+/* --------------------------------------------------------- api telemetry */
+
+export interface ApiUsageRow {
+  provider: string;
+  day: string;
+  requests: number;
+  successes: number;
+  unauthorized: number;
+  forbidden: number;
+  rateLimited: number;
+  timeouts: number;
+  serverErrors: number;
+  otherErrors: number;
+  lastSuccessAt: string | null;
+  lastErrorAt: string | null;
+  lastErrorKind: string | null;
+  lastErrorDetail: string | null;
+  rateLimitRemaining: number | null;
+  rateLimitLimit: number | null;
+  rateLimitResetAt: string | null;
+}
+
+const EMPTY_USAGE = (provider: string, day: string): ApiUsageRow => ({
+  provider, day,
+  requests: 0, successes: 0, unauthorized: 0, forbidden: 0,
+  rateLimited: 0, timeouts: 0, serverErrors: 0, otherErrors: 0,
+  lastSuccessAt: null, lastErrorAt: null, lastErrorKind: null, lastErrorDetail: null,
+  rateLimitRemaining: null, rateLimitLimit: null, rateLimitResetAt: null,
+});
+
+export class ApiUsageRepo {
+  constructor(private readonly db: Database) {}
+
+  private static map(r: Row): ApiUsageRow {
+    return {
+      provider: String(r['provider']),
+      day: String(r['day']),
+      requests: Number(r['requests']),
+      successes: Number(r['successes']),
+      unauthorized: Number(r['unauthorized']),
+      forbidden: Number(r['forbidden']),
+      rateLimited: Number(r['rate_limited']),
+      timeouts: Number(r['timeouts']),
+      serverErrors: Number(r['server_errors']),
+      otherErrors: Number(r['other_errors']),
+      lastSuccessAt: strOrNull(r['last_success_at']),
+      lastErrorAt: strOrNull(r['last_error_at']),
+      lastErrorKind: strOrNull(r['last_error_kind']),
+      lastErrorDetail: strOrNull(r['last_error_detail']),
+      rateLimitRemaining: numOrNull(r['rate_limit_remaining']),
+      rateLimitLimit: numOrNull(r['rate_limit_limit']),
+      rateLimitResetAt: strOrNull(r['rate_limit_reset_at']),
+    };
+  }
+
+  get(provider: string, day: string): ApiUsageRow {
+    const r = this.db.get('SELECT * FROM api_usage WHERE provider = ? AND day = ?', provider, day);
+    return r ? ApiUsageRepo.map(r) : EMPTY_USAGE(provider, day);
+  }
+
+  allForDay(day: string): ApiUsageRow[] {
+    return this.db.all('SELECT * FROM api_usage WHERE day = ? ORDER BY provider', day).map(ApiUsageRepo.map);
+  }
+
+  /**
+   * Record one request outcome.
+   *
+   * Counters are incremented in SQL rather than read-modify-written, so two
+   * concurrent in-flight requests cannot lose an increment between them.
+   */
+  record(entry: {
+    provider: string;
+    day: string;
+    outcome: 'SUCCESS' | 'UNAUTHORIZED' | 'FORBIDDEN' | 'RATE_LIMITED' | 'TIMEOUT' | 'SERVER_ERROR' | 'OTHER_ERROR';
+    at: string;
+    detail?: string | null;
+    rateLimitRemaining?: number | null;
+    rateLimitLimit?: number | null;
+    rateLimitResetAt?: string | null;
+  }): void {
+    const column = {
+      SUCCESS: 'successes',
+      UNAUTHORIZED: 'unauthorized',
+      FORBIDDEN: 'forbidden',
+      RATE_LIMITED: 'rate_limited',
+      TIMEOUT: 'timeouts',
+      SERVER_ERROR: 'server_errors',
+      OTHER_ERROR: 'other_errors',
+    }[entry.outcome];
+
+    const success = entry.outcome === 'SUCCESS';
+    this.db.run(
+      `INSERT INTO api_usage (provider, day, requests, ${column}, last_success_at, last_error_at,
+         last_error_kind, last_error_detail, rate_limit_remaining, rate_limit_limit, rate_limit_reset_at)
+       VALUES (?, ?, 1, 1, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(provider, day) DO UPDATE SET
+         requests = requests + 1,
+         ${column} = ${column} + 1,
+         last_success_at = COALESCE(excluded.last_success_at, last_success_at),
+         last_error_at = COALESCE(excluded.last_error_at, last_error_at),
+         last_error_kind = COALESCE(excluded.last_error_kind, last_error_kind),
+         last_error_detail = COALESCE(excluded.last_error_detail, last_error_detail),
+         rate_limit_remaining = COALESCE(excluded.rate_limit_remaining, rate_limit_remaining),
+         rate_limit_limit = COALESCE(excluded.rate_limit_limit, rate_limit_limit),
+         rate_limit_reset_at = COALESCE(excluded.rate_limit_reset_at, rate_limit_reset_at)`,
+      entry.provider,
+      entry.day,
+      success ? entry.at : null,
+      success ? null : entry.at,
+      success ? null : entry.outcome,
+      // Detail is a vendor message, never a credential: the meter only ever
+      // receives error text, and the logger redacts separately.
+      success ? null : (entry.detail ?? null),
+      entry.rateLimitRemaining ?? null,
+      entry.rateLimitLimit ?? null,
+      entry.rateLimitResetAt ?? null,
+    );
+  }
+}
+
+/* ------------------------------------------------------ provider cursors */
+
+export class CursorRepo {
+  constructor(private readonly db: Database, private readonly clock: Clock) {}
+
+  get(key: string): { value: string; observedAt: string } | null {
+    const r = this.db.get('SELECT * FROM provider_cursors WHERE cursor_key = ?', key);
+    return r ? { value: String(r['value']), observedAt: String(r['observed_at']) } : null;
+  }
+
+  set(key: string, value: string, observedAt: string): void {
+    this.db.run(
+      `INSERT INTO provider_cursors (cursor_key, value, observed_at, updated_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(cursor_key) DO UPDATE SET value = excluded.value,
+         observed_at = excluded.observed_at, updated_at = excluded.updated_at`,
+      key, value, observedAt, this.clock.nowIso(),
+    );
+  }
+
+  /** Cursors under a key prefix, shaped for `SocialQuery.sinceIds`. */
+  all(prefix?: string): Record<string, string> {
+    const rows = prefix
+      ? this.db.all('SELECT * FROM provider_cursors WHERE cursor_key LIKE ? ORDER BY cursor_key', `${prefix}%`)
+      : this.db.all('SELECT * FROM provider_cursors ORDER BY cursor_key');
+    const out: Record<string, string> = {};
+    for (const r of rows) out[String(r['cursor_key'])] = String(r['value']);
+    return out;
+  }
+
+  list(): { key: string; value: string; observedAt: string }[] {
+    return this.db.all('SELECT * FROM provider_cursors ORDER BY cursor_key').map((r) => ({
+      key: String(r['cursor_key']),
+      value: String(r['value']),
+      observedAt: String(r['observed_at']),
+    }));
+  }
+
+  /**
+   * Move a cursor FORWARD only.
+   *
+   * A vendor page can arrive out of order, and a cursor that moved backwards
+   * would re-download everything between the two positions on the next poll —
+   * or, worse, a cursor that jumped forward on a partial page would skip posts.
+   * Monotonic advance makes both impossible.
+   */
+  advance(key: string, value: string): boolean {
+    const current = this.get(key);
+    if (current && !isNewerCursor(value, current.value)) return false;
+    this.set(key, value, this.clock.nowIso());
+    return true;
+  }
+}
+
+/**
+ * Compare two cursor values.
+ *
+ * X post ids are numeric snowflakes — monotonically increasing — so where both
+ * sides parse as integers they are compared numerically. String comparison
+ * would be wrong the moment two ids differ in length, and a cursor that
+ * compared wrongly would silently re-download or silently skip.
+ *
+ * Ids outside that space (fixture and replay providers use readable labels)
+ * carry no ordering, so the provider's own notion of "newest" is authoritative
+ * and the write is accepted. That is safe because those providers decide
+ * freshness themselves rather than delegating it to the vendor.
+ */
+export function isNewerCursor(candidate: string, current: string): boolean {
+  const ordered = /^\d+$/.test(candidate) && /^\d+$/.test(current);
+  if (!ordered) return true;
+  return BigInt(candidate) > BigInt(current);
+}
+
 /* ------------------------------------------------------------------ store */
+
 
 export class Store {
   readonly securities: SecurityRepo;
@@ -1304,6 +1515,8 @@ export class Store {
   readonly log: DecisionLogRepo;
   readonly incidents: IncidentRepo;
   readonly bars: PriceBarRepo;
+  readonly apiUsage: ApiUsageRepo;
+  readonly cursors: CursorRepo;
 
   constructor(readonly db: Database, readonly clock: Clock) {
     this.securities = new SecurityRepo(db);
@@ -1325,6 +1538,8 @@ export class Store {
     this.log = new DecisionLogRepo(db, clock);
     this.incidents = new IncidentRepo(db);
     this.bars = new PriceBarRepo(db);
+    this.apiUsage = new ApiUsageRepo(db);
+    this.cursors = new CursorRepo(db, clock);
   }
 
   close(): void {

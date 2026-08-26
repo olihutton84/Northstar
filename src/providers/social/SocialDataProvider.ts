@@ -8,6 +8,14 @@
 import type { SocialAuthor, SocialEvent } from '../../domain/types.js';
 
 export interface SocialQuery {
+  /**
+   * Newest post id already seen, per query chunk.
+   *
+   * When present the provider asks the vendor for posts NEWER than this, which
+   * is the difference between "search for new information" and "re-download the
+   * same window every two minutes".
+   */
+  sinceIds?: Record<string, string>;
   /** Cashtags/tickers to search for, already restricted to the universe. */
   tickers: string[];
   /** Company names and aliases to search for. */
@@ -30,6 +38,10 @@ export interface SocialFetchResult {
   truncated: boolean;
   /** Provider-reported rate-limit headroom, when available. */
   rateLimitRemaining: number | null;
+  /** Newest post id seen per query chunk, to persist as the next cursor. */
+  newestIds: Record<string, string>;
+  /** How many vendor requests this fetch actually cost. */
+  requestCount: number;
 }
 
 export class SocialProviderError extends Error {
