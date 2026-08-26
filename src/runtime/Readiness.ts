@@ -18,7 +18,7 @@ import {
   xCredentialReport,
 } from '../config/env.js';
 import { SCHEMA_VERSION } from '../persistence/schema.js';
-import type { Strategy } from '../domain/types.js';
+import type { Strategy, TradeProposal, XSignal } from '../domain/types.js';
 import { ReconciliationService } from './Reconciliation.js';
 
 export type CheckStatus = 'PASS' | 'FAIL' | 'WARN' | 'SKIP';
@@ -339,6 +339,90 @@ export class ReadinessService {
   }
 
   /**
+   * A throwaway proposal and signal for dry-running an interlock.
+   *
+   * Deliberately in-memory only: it is handed straight to the risk engine and
+   * discarded. Nothing here is saved, and the ids are prefixed so that a copy
+   * escaping into a log is obviously not a real trade.
+   */
+  private syntheticDryRunSubject(
+    strategy: Strategy,
+  ): { proposal: TradeProposal; signal: XSignal } | null {
+    const security = this.app.universe.eligible(strategy.universeSources)[0];
+    if (!security) return null;
+
+    const now = this.clock.nowIso();
+    const signal: XSignal = {
+      signalId: 'readiness-dry-run-signal',
+      strategyId: strategy.strategyId,
+      strategyVersion: strategy.version,
+      securityId: security.securityId,
+      ticker: security.ticker,
+      score: 100,
+      band: 'STRONG_BULLISH',
+      uncertainty: 0,
+      components: {
+        sentiment: 100,
+        materiality: 100,
+        credibility: 100,
+        novelty: 100,
+        engagementVelocity: 100,
+        crossSourceConfirmation: 100,
+        priceConfirmation: 0,
+        recency: 100,
+      },
+      resolutionConfidence: 1,
+      independentSourceCount: 99,
+      sourceCount: 99,
+      contributions: [],
+      supportingEvidence: [],
+      contradictoryEvidence: [],
+      dominantEventType: 'GENERAL_COMMENTARY',
+      triggeringEventIds: [],
+      evidence: [],
+      explanation: 'Synthetic subject used only to dry-run the kill-switch interlock.',
+      priceConfirmationDetail: null,
+      generatedAt: now,
+      signalConfigId: strategy.signalConfigId,
+    };
+
+    const proposal: TradeProposal = {
+      proposalId: 'readiness-dry-run-proposal',
+      strategyId: strategy.strategyId,
+      strategyVersion: strategy.version,
+      signalId: signal.signalId,
+      securityId: security.securityId,
+      ticker: security.ticker,
+      direction: 'LONG',
+      side: 'BUY',
+      proposedCapitalCents: strategy.riskLimits.minOrderCents,
+      proposedQuantity: 1,
+      fractional: true,
+      referencePrice: 1,
+      referencePriceAsOf: now,
+      confidence: 1,
+      rationale: 'Synthetic subject used only to dry-run the kill-switch interlock.',
+      evidenceSummary: [],
+      createdAt: now,
+      expiresAt: new Date(this.clock.nowMs() + 60_000).toISOString(),
+      status: 'PENDING_RISK',
+      mode: strategy.mode,
+      riskDecisionId: null,
+      invalidationCondition: {
+        description: 'not applicable to a dry run',
+        signalReversalBelow: 0,
+        stopLossPct: strategy.riskLimits.maxDrawdownPct,
+        thesisExpiryHours: 1,
+        maxHoldingHours: 1,
+      },
+      approvalFingerprint: 'readiness-dry-run',
+      correlationId: 'readiness-dry-run',
+    };
+
+    return { proposal, signal };
+  }
+
+  /**
    * Does a full day of polling fit inside the request budget?
    *
    * Checked from the provider's OWN batching against the live universe, before
@@ -464,20 +548,29 @@ export class ReadinessService {
       };
     }
 
-    const proposal = this.app.store.proposals.recent(1)[0];
-    const signal = proposal ? this.app.store.signals.byId(proposal.signalId) : null;
+    /*
+     * Prefer a real stored proposal, but never DEPEND on one.
+     *
+     * This check used to downgrade to a warning on a fresh database and advise
+     * running a cycle to fix it — advice that, with real credentials during
+     * market hours, invites the operator to place a trade in order to satisfy
+     * a pre-flight check. The interlock can be proven without that: a synthetic
+     * proposal exercises exactly the same risk-engine branch, and is never
+     * persisted, never priced and never submitted.
+     */
+    const stored = this.app.store.proposals.recent(1)[0];
+    const storedSignal = stored ? this.app.store.signals.byId(stored.signalId) : null;
+    const synthetic = stored && storedSignal ? null : this.syntheticDryRunSubject(strategy);
+    const proposal = stored && storedSignal ? stored : synthetic?.proposal;
+    const signal = stored && storedSignal ? storedSignal : synthetic?.signal;
 
     if (!proposal || !signal) {
-      // Nothing to evaluate against yet. Fall back to asserting the interlock
-      // is present in the risk engine's check list.
       return {
         id: 'kill-switch',
         label: 'Kill switch functional',
-        status: 'WARN',
-        detail:
-          'No stored proposal to dry-run the interlock against yet. The KILL_SWITCH check is wired into the ' +
-          'risk engine, but this becomes a hard PASS after the first cycle produces a proposal.',
-        remedy: 'Run `npm run cycle` once, then re-run readiness.',
+        status: 'FAIL',
+        detail: 'Could not construct a subject to dry-run the interlock against.',
+        remedy: 'Run `npm run seed`, then re-run readiness.',
       };
     }
 
@@ -499,7 +592,9 @@ export class ReadinessService {
       label: 'Kill switch functional',
       status: blocked ? 'PASS' : 'FAIL',
       detail: blocked
-        ? 'A killed strategy is refused by the risk engine (verified by dry-run; the live strategy was not touched).'
+        ? `A killed strategy is refused by the risk engine (verified by dry-run against ` +
+          `${stored && storedSignal ? 'a stored proposal' : 'a synthetic proposal'}; ` +
+          'the live strategy was not touched and nothing was persisted, priced or submitted).'
         : `A killed strategy was NOT refused. Failed checks: ${decision.failedChecks.join(', ') || 'none'}.`,
       ...(blocked ? {} : { remedy: 'The KILL_SWITCH interlock is broken. Do not trade until it is fixed.' }),
     };

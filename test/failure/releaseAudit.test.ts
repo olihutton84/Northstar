@@ -519,3 +519,57 @@ describe('the day must be reconstructable afterwards', () => {
     h.close();
   });
 });
+
+/* ------------------------------------------------------- 14. readiness */
+
+describe('readiness never trades', () => {
+  it('proves the kill-switch interlock on a fresh database, without a cycle', async () => {
+    const h = createHarness({ posts: [] });
+
+    // Nothing has ever been proposed, so there is no stored subject. The check
+    // must still prove the interlock rather than advising the operator to run
+    // a cycle — advice that with real credentials invites a trade.
+    assert.equal(h.app.store.proposals.recent(1).length, 0);
+
+    const report = await h.app.readiness.run();
+    const killSwitch = report.checks.find((c) => c.id === 'kill-switch')!;
+
+    assert.equal(killSwitch.status, 'PASS', killSwitch.detail);
+    assert.match(killSwitch.detail, /synthetic/);
+    h.close();
+  });
+
+  it('persists nothing while dry-running the interlock', async () => {
+    const h = createHarness({ posts: [] });
+    await h.app.readiness.run();
+
+    assert.equal(h.app.store.proposals.recent(50).length, 0, 'no proposal may be written');
+    assert.equal(h.app.store.signals.recent(50).length, 0, 'no signal may be written');
+    assert.equal(h.app.store.risk.recent(50).length, 0, 'no risk decision may be written');
+    assert.equal(h.app.store.orders.all().length, 0, 'and above all, no order');
+    h.close();
+  });
+
+  it('submits no order even with a fully live-looking pipeline', async () => {
+    const h = createHarness({ posts: [bullishTier1Post(), corroboratingTier2Post()] });
+    const before = h.app.store.orders.all().length;
+
+    await h.app.readiness.run();
+    await h.app.readiness.run();
+
+    assert.equal(h.app.store.orders.all().length, before, 'readiness is read-only, always');
+    h.close();
+  });
+
+  it('withholds the real-data verdict while any provider is a fixture', async () => {
+    const h = createHarness({ posts: [bullishTier1Post(), corroboratingTier2Post()] });
+    const report = await h.app.readiness.run();
+
+    assert.equal(report.readyForRealDataPaper, false, 'fixtures can never be READY for real data');
+    assert.match(report.readyForRealDataPaperReason, /fixture/);
+
+    const noFixtures = report.checks.find((c) => c.id === 'no-fixtures')!;
+    assert.equal(noFixtures.status, 'FAIL');
+    h.close();
+  });
+});
