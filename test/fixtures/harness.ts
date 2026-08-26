@@ -15,6 +15,7 @@ import { FixtureMarketDataProvider } from '../../src/providers/marketdata/Fixtur
 import { FixtureSocialProvider, type FixturePost } from '../../src/providers/social/FixtureSocialProvider.js';
 import { SimulatedBrokerProvider } from '../../src/providers/broker/SimulatedBrokerProvider.js';
 import type { BrokerProvider } from '../../src/providers/broker/BrokerProvider.js';
+import type { UniverseSource } from '../../src/universe/load.js';
 import { SourceRegistry } from '../../src/providers/social/sourceRegistry.js';
 
 /** Tuesday 10 March 2026, 11:00 New York — the market is open. */
@@ -45,6 +46,7 @@ export function testEnv(overrides: Partial<NorthstarEnv> = {}): NorthstarEnv {
     liveTradingEnabled: false,
     approverId: 'test-operator',
     useFixtures: true,
+    universeFile: null,
     ...overrides,
   };
 }
@@ -79,6 +81,8 @@ export interface HarnessOptions {
   seed?: boolean;
   /** Substitute a failure-injecting broker for the simulated one. */
   broker?: BrokerProvider;
+  /** Supply a platform universe snapshot instead of the bot fallback. */
+  universeSource?: UniverseSource | null;
   /**
    * Back the database with a file instead of memory.
    *
@@ -119,6 +123,7 @@ export function createHarness(opts: HarnessOptions = {}): Harness {
     marketData,
     broker,
     databasePath: opts.databasePath ?? ':memory:',
+    ...(opts.universeSource !== undefined ? { universeSource: opts.universeSource } : {}),
     ...(opts.operations ? { operations: opts.operations } : {}),
   });
 

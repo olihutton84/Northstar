@@ -11,6 +11,8 @@
  * from the universe between signal and order is stopped at the gate.
  */
 import type { Security, UniverseSource } from '../domain/types.js';
+import type { UniverseProvenance } from './contract.js';
+import { universeFingerprint } from './contract.js';
 import type { Store } from '../persistence/store.js';
 import type { BrokerProvider } from '../providers/broker/BrokerProvider.js';
 import { seedToSecurities, UNIVERSE_SEED, type UniverseSeedEntry } from './seed.js';
@@ -22,11 +24,46 @@ export interface UniverseStats {
 }
 
 export class UniverseRegistry {
+  /**
+   * Where this universe came from.
+   *
+   * Carried on the registry rather than looked up elsewhere, so any surface
+   * holding a registry can say truthfully whether it is showing Platform data
+   * or the bot's fallback.
+   */
+  private provenance: UniverseProvenance | null = null;
+
   private byId = new Map<string, Security>();
   private byTicker = new Map<string, Security>();
 
   constructor(securities: Security[] = []) {
     this.replace(securities);
+  }
+
+  /** Attach the provenance of the securities this registry was built from. */
+  withProvenance(provenance: UniverseProvenance): this {
+    this.provenance = provenance;
+    return this;
+  }
+
+  /**
+   * How this universe was obtained.
+   *
+   * Falls back to describing an unlabelled registry honestly rather than
+   * guessing PLATFORM — an unknown origin must never read as authoritative.
+   */
+  origin(): UniverseProvenance {
+    if (this.provenance) return this.provenance;
+    const securities = this.all();
+    return {
+      origin: 'BOT_FALLBACK',
+      version: 'unlabelled',
+      generatedAt: null,
+      fingerprint: universeFingerprint(securities),
+      securityCount: securities.length,
+      rejection: null,
+      label: `BOT FALLBACK (unlabelled, ${securities.length} securities)`,
+    };
   }
 
   static fromSeed(seed: UniverseSeedEntry[] = UNIVERSE_SEED): UniverseRegistry {

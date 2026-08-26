@@ -25,6 +25,16 @@ export interface ObservabilityPayload {
     mode: string;
     forcedFixtures: boolean;
     allReal: boolean;
+    /** Which universe is active. PLATFORM data and the bot's own fallback are never conflated. */
+    universe: {
+      origin: string;
+      version: string;
+      generatedAt: string | null;
+      fingerprint: string;
+      securityCount: number;
+      label: string;
+      rejection: { source: string; problems: string[] } | null;
+    };
     /** The concrete implementations behind the labels. */
     ids: { social: string; marketData: string; broker: string };
   };
@@ -229,6 +239,7 @@ export function buildObservability(app: NorthstarApp): ObservabilityPayload {
         marketData: app.marketData.providerId,
         broker: app.broker.brokerId,
       },
+      universe: providers.universe,
     },
 
     process: {

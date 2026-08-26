@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
- * Northstar Trading Lab CLI.
+ * Northstar X Trading Bot CLI.
  *
  *   northstar migrate            create/upgrade the database
  *   northstar seed               create the strategy, universe and $50 ledger
  *   northstar cycle              run one full pipeline cycle
  *   northstar paper [--interval] run the paper loop continuously
- *   northstar serve              start the Trading Lab dashboard
+ *   northstar serve              start the X Bot Console
  *   northstar status             print strategy status and the ledger
  *   northstar report [horizon]   print the paper-qualification report
  *   northstar funnel             print today's stage-by-stage funnel
@@ -96,6 +96,19 @@ function printProviderBanner(app: NorthstarApp): void {
   out(`Market Data:  ${tag(p.marketData, p.marketData === 'TIINGO')}`);
   out(`Broker:       ${tag(p.broker, p.broker.startsWith('ALPACA'))}`);
   out(`Mode:         ${p.mode}`);
+
+  // Never let fallback data read as live Platform state.
+  const u = p.universe;
+  const universeColour = u.origin === 'PLATFORM' ? GREEN : YELLOW;
+  out(`Universe:     ${universeColour}${u.origin === 'PLATFORM' ? 'PLATFORM' : 'BOT FALLBACK'}${RESET}  ` +
+      `${DIM}${u.version} · ${u.securityCount} securities · fingerprint ${u.fingerprint}${RESET}`);
+  if (u.rejection) {
+    out(`${RED}  Platform universe REJECTED from ${u.rejection.source}:${RESET}`);
+    for (const problem of u.rejection.problems.slice(0, 5)) out(`${RED}    - ${problem}${RESET}`);
+    if (u.rejection.problems.length > 5) out(`${DIM}    ...and ${u.rejection.problems.length - 5} more${RESET}`);
+  } else if (u.origin === 'BOT_FALLBACK') {
+    out(`${DIM}  This is the bot's own list, not live Northstar Platform membership.${RESET}`);
+  }
 
   if (p.forcedFixtures) {
     out(`${YELLOW}NORTHSTAR_USE_FIXTURES=true — fixtures are forced, any real credentials are ignored.${RESET}`);
@@ -203,7 +216,7 @@ async function main(): Promise<void> {
       const server = new ApiServer({ app, port: env.httpPort, logger, approverId: env.approverId });
       await server.listen();
       printProviderBanner(app);
-      out(`Trading Lab: http://localhost:${env.httpPort}`);
+      out(`X Bot Console: http://localhost:${env.httpPort}`);
       break;
     }
 
@@ -601,7 +614,7 @@ async function main(): Promise<void> {
       const strategy = app.setMode(mode);
       out(`Mode set to ${strategy.mode}. Broker is ${app.broker.brokerId} (${app.broker.mode}).`);
       if (mode === 'LIVE') {
-        out('LIVE mode: every order now requires explicit human approval in Trading Lab before submission.');
+        out('LIVE mode: every order now requires explicit human approval in the X Bot Console before submission.');
       }
       app.close();
       break;
@@ -756,7 +769,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function printHelp(): void {
-  out(`Northstar Trading Lab — X Signal Bot
+  out(`Northstar X Trading Bot — X Bot Console
 
   migrate                  create or upgrade the database
   seed                     create the strategy, universe and $50 capital ledger
@@ -765,7 +778,7 @@ function printHelp(): void {
                            in SECONDS. Position monitoring (60s) and
                            reconciliation (180s) run on their own cadences.
                            --cycles N bounds the number of X scans.
-  serve [--mode PAPER]     start the Trading Lab dashboard
+  serve [--mode PAPER]     start the X Bot Console
   status                   strategy status and capital ledger
   simulate [--cycles 60]   offline paper simulation over the real pipeline
   replay sample            write a deterministic sample replay dataset

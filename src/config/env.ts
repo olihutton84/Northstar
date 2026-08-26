@@ -39,6 +39,14 @@ export interface NorthstarEnv {
 
   /** Use recorded fixtures instead of live vendor calls. */
   useFixtures: boolean;
+
+  /**
+   * Path to a Northstar Platform universe snapshot.
+   *
+   * Absent means the bot runs its own fallback universe, clearly labelled as
+   * such. It is never a credential and never reaches a provider.
+   */
+  universeFile: string | null;
 }
 
 /**
@@ -97,6 +105,8 @@ export function loadEnv(): NorthstarEnv {
     approverId: str('NORTHSTAR_APPROVER_ID', 'local-operator'),
 
     useFixtures: bool('NORTHSTAR_USE_FIXTURES', false),
+
+    universeFile: optional('NORTHSTAR_UNIVERSE_FILE'),
   };
 }
 

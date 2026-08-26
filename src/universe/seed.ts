@@ -1,16 +1,27 @@
 /**
- * The initial X universe.
+ * The BOT FALLBACK universe.
  *
- * The bot does not read the X firehose. It reads a bounded allowlist built from
- * Northstar's investable universe, which is what makes entity resolution
- * tractable: "$F" only resolves to Ford because Ford is on the list, and
- * "Apple" only resolves to AAPL because no other allowlisted company claims
- * that alias.
+ * This is NOT the Northstar Platform's portfolio, research list or watchlist.
+ * It is this repository's own bounded allowlist, maintained here so the bot
+ * stays independently deployable and a Platform outage cannot stop a paper
+ * session. It is a plausible stand-in, hand-written, and it goes stale.
  *
- * Each entry declares which Northstar list put it here. In a Northstar
- * deployment with live watchlist/research/portfolio services, this seed is
- * replaced by those services via UniverseRegistry.loadFrom(...); the shape
- * stays identical.
+ * The bot does not read the X firehose. It reads a bounded allowlist, which is
+ * what makes entity resolution tractable: "$F" only resolves to Ford because
+ * Ford is on the list, and "Apple" only resolves to AAPL because no other
+ * allowlisted company claims that alias.
+ *
+ * The `sources` tags below are CLAIMS ABOUT MEMBERSHIP, and this file is not
+ * their owner. When the Platform supplies a universe snapshot (see
+ * `contract.ts` and `load.ts`) it replaces this list entirely and its claims
+ * are authoritative. Until then these tags are a local approximation used to
+ * shape the fallback, and whichever universe is active is stated plainly in
+ * the startup banner, the dashboard and the session record — so fallback data
+ * is never presented as live Platform state.
+ *
+ * The tags are kept as they are on purpose: `x-signal-v1` declares the same
+ * source names in its frozen spec, so changing them here would change which
+ * securities the strategy may trade and would republish the strategy version.
  */
 import type { Security, UniverseSource } from '../domain/types.js';
 
@@ -29,8 +40,11 @@ export interface UniverseSeedEntry {
  * "Visa" the travel document) are handled by the resolver's context rules
  * rather than by removing them here — see tickerResolution.ts.
  */
-export const UNIVERSE_SEED: UniverseSeedEntry[] = [
-  // --- Northstar portfolio (US-listed) -----------------------------------
+/** Identifies this fallback list in provenance records and session logs. */
+export const FALLBACK_UNIVERSE_ID = 'bot-fallback-v1';
+
+export const UNIVERSE_FALLBACK_SEED: UniverseSeedEntry[] = [
+  // --- large-cap core (approximates a portfolio list) ---------------------
   { ticker: 'AAPL', companyName: 'Apple Inc.', aliases: ['Apple', 'iPhone maker'], exchange: 'NASDAQ',
     sources: ['ALPACA_US_EQUITY', 'NORTHSTAR_PORTFOLIO', 'NORTHSTAR_WATCHLIST'] },
   { ticker: 'MSFT', companyName: 'Microsoft Corporation', aliases: ['Microsoft', 'Azure', 'MSFT'], exchange: 'NASDAQ',
@@ -42,7 +56,7 @@ export const UNIVERSE_SEED: UniverseSeedEntry[] = [
   { ticker: 'AMZN', companyName: 'Amazon.com Inc.', aliases: ['Amazon', 'AWS'], exchange: 'NASDAQ',
     sources: ['ALPACA_US_EQUITY', 'NORTHSTAR_PORTFOLIO'] },
 
-  // --- Northstar research ------------------------------------------------
+  // --- semiconductors and AI infrastructure (approximates a research list) -
   { ticker: 'AMD', companyName: 'Advanced Micro Devices, Inc.', aliases: ['AMD', 'Advanced Micro Devices'],
     exchange: 'NASDAQ', sources: ['ALPACA_US_EQUITY', 'NORTHSTAR_RESEARCH', 'NORTHSTAR_WATCHLIST'] },
   { ticker: 'INTC', companyName: 'Intel Corporation', aliases: ['Intel'], exchange: 'NASDAQ',
@@ -56,7 +70,7 @@ export const UNIVERSE_SEED: UniverseSeedEntry[] = [
   { ticker: 'PLTR', companyName: 'Palantir Technologies Inc.', aliases: ['Palantir'], exchange: 'NASDAQ',
     sources: ['ALPACA_US_EQUITY', 'NORTHSTAR_RESEARCH', 'TRADING_LAB_UNIVERSE'] },
 
-  // --- Northstar watchlist ------------------------------------------------
+  // --- broader liquid US names (approximates a watchlist) ------------------
   { ticker: 'TSLA', companyName: 'Tesla, Inc.', aliases: ['Tesla'], exchange: 'NASDAQ',
     sources: ['ALPACA_US_EQUITY', 'NORTHSTAR_WATCHLIST', 'TRADING_LAB_UNIVERSE'] },
   { ticker: 'META', companyName: 'Meta Platforms, Inc.', aliases: ['Meta Platforms', 'Facebook', 'Instagram'],
@@ -101,7 +115,7 @@ export function securityIdForTicker(ticker: string): string {
   return `sec_${ticker.toUpperCase()}`;
 }
 
-export function seedToSecurities(seed: UniverseSeedEntry[] = UNIVERSE_SEED): Security[] {
+export function seedToSecurities(seed: UniverseSeedEntry[] = UNIVERSE_FALLBACK_SEED): Security[] {
   return seed.map((e) => ({
     securityId: securityIdForTicker(e.ticker),
     ticker: e.ticker.toUpperCase(),
@@ -115,3 +129,9 @@ export function seedToSecurities(seed: UniverseSeedEntry[] = UNIVERSE_SEED): Sec
     active: true,
   }));
 }
+
+/**
+ * @deprecated Use `UNIVERSE_FALLBACK_SEED`. Retained so existing callers keep
+ * working; the rename exists to stop this list reading as live Platform state.
+ */
+export const UNIVERSE_SEED = UNIVERSE_FALLBACK_SEED;

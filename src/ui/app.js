@@ -278,6 +278,11 @@ function renderHealth() {
     ${cell('Market data', p.marketData, p.marketData === 'TIINGO' ? 'ok' : 'warn', p.ids.marketData)}
     ${cell('Broker', p.broker, p.broker.startsWith('ALPACA') ? 'ok' : 'warn', p.ids.broker)}
     ${cell('Mode', p.mode, p.mode === 'LIVE' ? 'warn' : 'ok', `strategy ${health.strategy.version}`)}
+    ${cell('Universe', p.universe.origin === 'PLATFORM' ? 'PLATFORM' : 'BOT FALLBACK',
+      p.universe.origin === 'PLATFORM' ? 'ok' : 'warn',
+      p.universe.rejection
+        ? `platform universe rejected — ${p.universe.rejection.problems.length} problem(s)`
+        : `${p.universe.version} · ${p.universe.securityCount} securities`)}
 
     ${cell('Last X ingest', ago(pr.staleness.social),
       staleTone(pr.staleness.social, up, 60, 180),
@@ -552,7 +557,7 @@ async function rejectProposal(proposalId) {
   try {
     const result = await api(`/api/proposals/${proposalId}/reject`, {
       method: 'POST',
-      body: JSON.stringify({ note: 'Rejected from Trading Lab' }),
+      body: JSON.stringify({ note: 'Rejected from the X Bot Console' }),
     });
     toast(result.detail, 'good');
   } catch (e) {
@@ -907,7 +912,7 @@ $('#btn-cycle').addEventListener('click', async () => {
 });
 
 $('#btn-kill').addEventListener('click', async () => {
-  const reason = prompt('Reason for KILL BOT?', 'Manual stop from Trading Lab');
+  const reason = prompt('Reason for KILL BOT?', 'Manual stop from the X Bot Console');
   if (reason === null) return;
   const liquidate = confirm(
     'Also LIQUIDATE all open positions?\n\n' +

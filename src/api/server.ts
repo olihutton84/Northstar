@@ -1,5 +1,8 @@
 /**
- * Trading Lab HTTP surface.
+ * X Bot Console HTTP surface.
+ *
+ * The local monitoring UI and JSON API for THIS bot. Distinct from the
+ * Northstar Platform's own Trading Lab, which lives in the Platform repo.
  *
  * Serves the X Signal Bot dashboard and its JSON API. Built on node:http with
  * no framework so the whole system stays dependency-free.
@@ -56,7 +59,7 @@ export class ApiServer {
         void this.handle(req, res);
       });
       this.server.listen(this.port, () => {
-        this.log.info(`Trading Lab listening on http://localhost:${this.port}`);
+        this.log.info(`X Bot Console listening on http://localhost:${this.port}`);
         resolve();
       });
     });
@@ -248,14 +251,14 @@ export class ApiServer {
       const b = (body ?? {}) as { reason?: string; liquidate?: boolean };
       // Liquidation is a separate, explicit confirmation. Absent it, positions
       // are left alone and only new risk is stopped.
-      const strategy = this.app.health.kill(b.reason ?? 'Manual KILL BOT from Trading Lab', b.liquidate === true);
+      const strategy = this.app.health.kill(b.reason ?? 'Manual KILL BOT from the X Bot Console', b.liquidate === true);
       const cancelled = await this.app.orderRouter.cancelOpenOrders(this.app.spec.strategyId);
       this.sendJson(res, 200, { strategy, cancelled, liquidate: b.liquidate === true });
     });
 
     r('POST', /^\/api\/control\/resume$/, (_req, res, _params, body) => {
       const b = (body ?? {}) as { note?: string };
-      this.sendJson(res, 200, this.app.health.resume(b.note ?? 'Resumed from Trading Lab'));
+      this.sendJson(res, 200, this.app.health.resume(b.note ?? 'Resumed from the X Bot Console'));
     });
 
     r('POST', /^\/api\/control\/mode$/, (_req, res, _params, body) => {

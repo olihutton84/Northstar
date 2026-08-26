@@ -1,6 +1,18 @@
-# Northstar
+# Northstar X Trading Bot
 
-Trading Lab, and its first live experiment: the **X Signal Bot** (`x-signal-v1`).
+The standalone **X Signal Bot** (`x-signal-v1`) and its local monitoring UI,
+the **X Bot Console**.
+
+> **Scope.** This repository is the trading bot only. It is not the Northstar
+> Platform and contains no part of it — no portfolio UI, no Trading 212, no
+> Research, no Decide, no Reports, no recommendation engine, no Reddit/news
+> intelligence, no Stitch design system. The Platform supplies universe
+> membership and may read this bot's results; neither integration is built
+> here. See **[CLAUDE.md](CLAUDE.md)** for the full boundary and
+> **[docs/PLATFORM_INTEGRATION.md](docs/PLATFORM_INTEGRATION.md)** for both
+> contracts.
+>
+> The bot is **independently deployable**: it runs without the Platform.
 
 The bot reads X, decides whether anything said there is *material, credible, new
 and corroborated*, turns that into an explainable signal, puts the signal in
@@ -14,6 +26,27 @@ X → Ingestion → Filtering → Ticker Resolution → Signal Engine → Risk E
   → Trade Proposal → Alpaca Paper OR Human-Approved Live Order
   → Trade → Performance → Analytics
 ```
+
+## The universe
+
+The bot trades a bounded allowlist. Membership is owned by the Northstar
+Platform, not by this repository.
+
+| Priority | Universe | When |
+|---|---|---|
+| 1 | **PLATFORM** | `NORTHSTAR_UNIVERSE_FILE` points at a valid snapshot |
+| 2 | **BOT FALLBACK** | no snapshot configured, or one was rejected |
+
+Whichever is active is stated in the startup banner, on the console and in the
+session record. A malformed snapshot is rejected **whole** — never partially
+ingested — and the reason is recorded. Fallback data is never presented as
+live Platform state.
+
+```
+Universe:     BOT FALLBACK  bot-fallback-v1 · 29 securities · fingerprint 7ffeebb63eb03987
+  This is the bot's own list, not live Northstar Platform membership.
+```
+
 
 ---
 

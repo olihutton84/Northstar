@@ -66,6 +66,8 @@ import { SessionWatch } from './runtime/SessionWatch.js';
 import { SignalAuditService } from './runtime/SignalAudit.js';
 import { StrategyRunner } from './runtime/StrategyRunner.js';
 import { UniverseRegistry } from './universe/UniverseRegistry.js';
+import { fileUniverseSource, loadUniverse, type UniverseSource } from './universe/load.js';
+import type { UniverseProvenance } from './universe/contract.js';
 
 export interface NorthstarAppOptions {
   env?: NorthstarEnv;
@@ -81,6 +83,8 @@ export interface NorthstarAppOptions {
   strategySpec?: StrategyVersionSpec;
   /** Override operational cadences (tests, replay). */
   operations?: Partial<OperationsConfig>;
+  /** Supply the universe directly (tests, or a future HTTP source). */
+  universeSource?: UniverseSource | null;
 }
 
 export class NorthstarApp {
@@ -145,8 +149,19 @@ export class NorthstarApp {
     this.signalConfig = getSignalConfig(this.spec.signalConfigId);
 
     /* ----------------------------------------------------- universe --- */
-    const persisted = this.store.securities.active();
-    this.universe = persisted.length > 0 ? new UniverseRegistry(persisted) : UniverseRegistry.fromSeed();
+    /*
+     * The ACTIVE universe is decided by what is configured now, not by what is
+     * stored from a previous run. Persisted securities are a record of the last
+     * universe used, and reusing them silently would mean a session that once
+     * had a Platform snapshot keeps trading that list after the snapshot is
+     * gone — presenting stale Platform data as current. The persisted copy is
+     * refreshed by `seed()`; the decision is made here, every start.
+     */
+    const loaded = loadUniverse(
+      opts.universeSource ?? (this.env.universeFile ? fileUniverseSource(this.env.universeFile) : null),
+      this.logger,
+    );
+    this.universe = new UniverseRegistry(loaded.securities).withProvenance(loaded.provenance);
     this.sourceRegistry = new SourceRegistry();
 
     /* ---------------------------------------------------- providers --- */
@@ -546,6 +561,9 @@ export class NorthstarApp {
         benchmarkTicker: this.spec.benchmarkTicker,
         universeSources: this.spec.universeSources,
         universeSize: this.universe.all().length,
+        // The exact eligible universe this session traded against, so a trade
+        // months from now can be reconstructed against the right list.
+        universe: this.universe.origin(),
 
         operations: this.ops,
         requestsPerScan: this.requestsPerScan(),
@@ -621,6 +639,7 @@ export class NorthstarApp {
       marketData,
       broker,
       mode,
+      universe: this.universe.origin(),
       allReal: social === 'LIVE' && marketData === 'TIINGO' && this.broker.brokerId === 'alpaca',
       forcedFixtures: forced,
     };
@@ -640,6 +659,8 @@ export interface ProviderSummary {
   marketData: 'TIINGO' | 'FIXTURE';
   broker: string;
   mode: TradingMode;
+  /** Which universe is active, and where it came from. */
+  universe: UniverseProvenance;
   /** True only when X, Tiingo and Alpaca are all the real thing. */
   allReal: boolean;
   /** True when NORTHSTAR_USE_FIXTURES overrode otherwise-valid credentials. */
