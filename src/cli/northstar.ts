@@ -559,8 +559,11 @@ async function main(): Promise<void> {
     }
 
     case 'kill': {
-      const reason = args.join(' ') || 'Manual kill from CLI';
+      // Flags are stripped from the reason. The halt reason is a permanent
+      // forensic record of WHY the bot was stopped; "market gap --liquidate"
+      // reads as though the flag were part of the operator's reasoning.
       const liquidate = args.includes('--liquidate');
+      const reason = args.filter((a) => !a.startsWith('--')).join(' ') || 'Manual kill from CLI';
       const app = makeApp();
       app.seed();
       app.health.kill(reason, liquidate);
@@ -576,7 +579,9 @@ async function main(): Promise<void> {
     case 'resume': {
       const app = makeApp();
       app.seed();
-      const strategy = app.health.resume(args.join(' ') || 'Resumed from CLI');
+      const strategy = app.health.resume(
+        args.filter((a) => !a.startsWith('--')).join(' ') || 'Resumed from CLI',
+      );
       out(`Strategy resumed: ${strategy.runState}`);
       app.close();
       break;

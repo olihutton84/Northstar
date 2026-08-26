@@ -14,6 +14,9 @@ import {
   tiingoCredentialReport,
   xCredentialReport,
 } from '../../src/config/env.js';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { FixedClock, NullLogger } from '../../src/core/index.js';
 import { TEST_NOW } from '../fixtures/harness.js';
 
@@ -212,5 +215,78 @@ describe('provider selection', () => {
         }),
       /LIVE credentials missing/,
     );
+  });
+});
+
+/* --------------------------------------------------- template completeness */
+
+describe('.env.example documents every variable the code reads', () => {
+  /**
+   * Walk up to the repository root.
+   *
+   * Resolved by looking for the marker files rather than counting `..`
+   * segments, because these tests run from `dist/` where the depth differs
+   * from the source tree.
+   */
+  const root = (() => {
+    let dir = fileURLToPath(new URL('.', import.meta.url));
+    for (let i = 0; i < 8; i += 1) {
+      if (existsSync(join(dir, '.env.example')) && existsSync(join(dir, 'package.json'))) return dir;
+      dir = dirname(dir);
+    }
+    throw new Error('could not locate the repository root from the test file');
+  })();
+
+  /** Every env var name the source actually reads, however it reads it. */
+  function varsReadByCode(): Set<string> {
+    const names = new Set<string>();
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.name.endsWith('.ts')) {
+          const src = readFileSync(full, 'utf8');
+          // The helpers take an optional default, so the name may be followed
+          // by a comma rather than a closing paren.
+          for (const m of src.matchAll(/(?:raw|num|str|bool|optional)\('([A-Z][A-Z0-9_]*)'\s*[,)]/g)) names.add(m[1]!);
+          for (const m of src.matchAll(/process\.env\['([A-Z][A-Z0-9_]*)'\]/g)) names.add(m[1]!);
+        }
+      }
+    };
+    walk(join(root, 'src'));
+    return names;
+  }
+
+  function varsInTemplate(): Set<string> {
+    const text = readFileSync(join(root, '.env.example'), 'utf8');
+    const names = new Set<string>();
+    // Both live entries and commented-out optional ones count as documented.
+    for (const m of text.matchAll(/^#?\s*([A-Z][A-Z0-9_]*)=/gm)) names.add(m[1]!);
+    return names;
+  }
+
+  it('leaves no variable undiscoverable', () => {
+    const code = varsReadByCode();
+    const template = varsInTemplate();
+    const missing = [...code].filter((n) => !template.has(n)).sort();
+
+    // A tuning knob nobody can find is not a tuning knob, and a required
+    // credential nobody can find is a failed first run.
+    assert.deepEqual(missing, [], `undocumented in .env.example: ${missing.join(', ')}`);
+  });
+
+  it('documents nothing the code no longer reads', () => {
+    const code = varsReadByCode();
+    const template = varsInTemplate();
+    const stale = [...template].filter((n) => !code.has(n)).sort();
+    assert.deepEqual(stale, [], `stale entries in .env.example: ${stale.join(', ')}`);
+  });
+
+  it('keeps every credential blank in the template', () => {
+    const text = readFileSync(join(root, '.env.example'), 'utf8');
+    for (const line of text.split('\n')) {
+      const m = line.match(/^([A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET)[A-Z0-9_]*)=(.*)$/);
+      if (m) assert.equal(m[2], '', `${m[1]} must ship blank, never with a value`);
+    }
   });
 });

@@ -282,3 +282,29 @@ describe('kill switch', () => {
     }
   });
 });
+
+describe('the kill reason is a clean forensic record', () => {
+  it('strips CLI flags from the recorded reason', () => {
+    // The halt reason is permanent and is what an operator reads months later
+    // when asking why the bot stopped. "market gap --liquidate" reads as
+    // though the flag were part of their reasoning.
+    const args = ['market', 'gap', '--liquidate'];
+    const reason = args.filter((a) => !a.startsWith('--')).join(' ');
+    assert.equal(reason, 'market gap');
+    assert.ok(!reason.includes('--'), 'no flag may survive into the reason');
+  });
+
+  it('still honours the flag it stripped', async () => {
+    const h = createHarness({ posts: POSTS() });
+    await h.app.runner.runCycle();
+    assert.equal(h.app.store.positions.open(h.app.spec.strategyId).length, 1);
+
+    h.app.health.kill('market gap', true);
+
+    const state = h.app.health.state();
+    assert.equal(state.killed, true);
+    assert.equal(state.liquidateOnKill, true, 'the stripped flag must still take effect');
+    assert.equal(state.haltReason, 'market gap', 'and the reason stays clean');
+    h.close();
+  });
+});
