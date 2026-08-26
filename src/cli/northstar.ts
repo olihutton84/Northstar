@@ -6,6 +6,7 @@
  *   northstar seed               create the strategy, universe and $50 ledger
  *   northstar cycle              run one full pipeline cycle
  *   northstar paper [--interval] run the paper loop continuously
+ *   northstar run                the deployable process: loops + console
  *   northstar serve              start the X Bot Console
  *   northstar status             print strategy status and the ledger
  *   northstar report [horizon]   print the paper-qualification report
@@ -23,6 +24,8 @@ import { loadEnv } from '../config/env.js';
 import { estimateDailyXRequests, type OperationsConfig } from '../config/operations.js';
 import { ConfigurationError, NorthstarApp } from '../app.js';
 import { ApiServer } from '../api/server.js';
+import { startBotProcess } from '../runtime/BotProcess.js';
+import { assessStorage, databaseDirectoryUsable, type StorageVerdict } from '../runtime/StorageCheck.js';
 import type { ForwardHorizon, TradingMode } from '../domain/types.js';
 import { openDatabase } from '../persistence/db.js';
 import { runSimulation, summarise } from './simulation.js';
@@ -74,6 +77,20 @@ const RED = '\x1b[31m';
 const YELLOW = '\x1b[33m';
 const DIM = '\x1b[2m';
 const RESET = '\x1b[0m';
+
+/** A one-word durability label for the database path. */
+function storageTag(verdict: StorageVerdict): string {
+  switch (verdict) {
+    case 'PERSISTENT':
+      return `${GREEN}PERSISTENT${RESET}`;
+    case 'LOCAL':
+      return `${DIM}local disk${RESET}`;
+    case 'IN_MEMORY':
+      return `${RED}IN MEMORY — NOTHING IS SAVED${RESET}`;
+    case 'LIKELY_EPHEMERAL':
+      return `${RED}LIKELY EPHEMERAL${RESET}`;
+  }
+}
 
 /**
  * Positively state which providers are live.
@@ -210,13 +227,90 @@ async function main(): Promise<void> {
       break;
     }
 
+    /*
+     * The deployable entrypoint. `npm start` runs this.
+     *
+     * One process: the trading loops and the console together, because they
+     * share one SQLite file and the scheduler assumes a single writer. It
+     * blocks until a signal or the scan bound, so a platform supervising it
+     * sees a long-running service rather than a command that exits.
+     */
+    case 'run': {
+      const app = makeApp('PAPER');
+      app.seed();
+      app.setMode('PAPER');
+      printProviderBanner(app);
+
+      const runTrading = env.runnerEnabled;
+
+      /*
+       * State the durability of the database before the first scan, not after
+       * the first lost ledger. On an ephemeral container filesystem every
+       * guarantee in this system is discarded on the next deploy, and nothing
+       * else in the banner would look any different.
+       */
+      const storage = assessStorage(env.databasePath);
+      const usable = databaseDirectoryUsable(env.databasePath);
+
+      const perScan = app.requestsPerScan();
+      const estimate = app.estimateDailyRequests();
+
+      out();
+      out(`${BOLD}Process${RESET}`);
+      out(`  Console            ${env.httpHost}:${env.httpPort === 0 ? '(assigned at bind)' : env.httpPort}`);
+      out(`  Trading loops      ${runTrading ? 'ENABLED' : `${YELLOW}DISABLED${RESET} (NORTHSTAR_RUNNER_ENABLED=false)`}`);
+      out(`  Database           ${env.databasePath}  ${storageTag(storage.verdict)}`);
+      if (storage.verdict === 'LIKELY_EPHEMERAL' || storage.verdict === 'IN_MEMORY') {
+        out(`${RED}    ${storage.detail}${RESET}`);
+        if (storage.remedy) out(`${YELLOW}    Fix: ${storage.remedy}${RESET}`);
+      }
+      if (!usable.ok) out(`${RED}    Database directory unusable: ${usable.detail}${RESET}`);
+      out(`  X scan             every ${app.ops.xScanIntervalSeconds}s · ${perScan} batched quer${perScan === 1 ? 'y' : 'ies'} · ~${estimate.requests}/day`);
+      out(`  Position monitor   every ${app.ops.positionMonitorIntervalSeconds}s`);
+      out(`  Reconciliation     every ${app.ops.reconciliationIntervalSeconds}s`);
+      out();
+
+      const maxScans = flag(args, '--cycles');
+      const handle = await startBotProcess({
+        app,
+        logger,
+        serveConsole: true,
+        port: env.httpPort,
+        host: env.httpHost,
+        approverId: env.approverId,
+        runTrading,
+        ...(maxScans === undefined ? {} : { maxScans: Number(maxScans) }),
+      });
+
+      if (handle.address) out(`Console: http://${handle.address.host === '0.0.0.0' ? 'localhost' : handle.address.host}:${handle.address.port}`);
+      out('Running. SIGTERM or Ctrl-C stops it gracefully.');
+      await handle.done;
+
+      // The loops have stopped but the database is still open, so the day can
+      // still be summarised before the process lets go of it.
+      out();
+      out(app.dailyReport.render(app.dailyReport.build()));
+      app.close();
+
+      // A graceful stop is a SUCCESS. Exiting non-zero here would read as a
+      // crash to a platform supervisor and trigger a restart loop.
+      process.exitCode = 0;
+      break;
+    }
+
     case 'serve': {
       const app = makeApp(modeArg(args));
       app.seed();
-      const server = new ApiServer({ app, port: env.httpPort, logger, approverId: env.approverId });
+      const server = new ApiServer({
+        app,
+        port: env.httpPort,
+        host: env.httpHost,
+        logger,
+        approverId: env.approverId,
+      });
       await server.listen();
       printProviderBanner(app);
-      out(`X Bot Console: http://localhost:${env.httpPort}`);
+      out(`X Bot Console: http://${env.httpHost === '0.0.0.0' ? 'localhost' : env.httpHost}:${server.boundPort ?? env.httpPort}`);
       break;
     }
 
@@ -778,7 +872,9 @@ function printHelp(): void {
                            in SECONDS. Position monitoring (60s) and
                            reconciliation (180s) run on their own cadences.
                            --cycles N bounds the number of X scans.
-  serve [--mode PAPER]     start the X Bot Console
+  run                      the deployable process: trading loops + console
+                           (this is what "npm start" runs)
+  serve [--mode PAPER]     start the X Bot Console only
   status                   strategy status and capital ledger
   simulate [--cycles 60]   offline paper simulation over the real pipeline
   replay sample            write a deterministic sample replay dataset

@@ -37,6 +37,7 @@ export function testEnv(overrides: Partial<NorthstarEnv> = {}): NorthstarEnv {
     dataDir: './data',
     databasePath: ':memory:',
     httpPort: 0,
+    httpHost: '127.0.0.1',
     logLevel: 'error',
     xBearerToken: null,
     xApiBaseUrl: 'https://api.twitter.com/2',
@@ -47,6 +48,7 @@ export function testEnv(overrides: Partial<NorthstarEnv> = {}): NorthstarEnv {
     approverId: 'test-operator',
     useFixtures: true,
     universeFile: null,
+    runnerEnabled: true,
     ...overrides,
   };
 }

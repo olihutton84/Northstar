@@ -25,6 +25,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 export interface ApiServerOptions {
   app: NorthstarApp;
   port: number;
+  /** Interface to bind. Defaults to loopback; containers pass 0.0.0.0. */
+  host?: string;
   logger: Logger;
   /** Identity recorded against approvals made through this server. */
   approverId: string;
@@ -39,15 +41,24 @@ interface Route {
 export class ApiServer {
   private readonly app: NorthstarApp;
   private readonly port: number;
+  private readonly host: string;
   private readonly log: Logger;
   private readonly approverId: string;
   private readonly routes: Route[] = [];
+  /**
+   * The port actually bound.
+   *
+   * Not the same as the requested port: port 0 asks the OS to choose one, and
+   * the caller needs to know which. Null until `listen()` resolves.
+   */
+  private bound: number | null = null;
   private server: Server | null = null;
   private uiCache: { html: string; css: string; js: string } | null = null;
 
   constructor(opts: ApiServerOptions) {
     this.app = opts.app;
     this.port = opts.port;
+    this.host = opts.host ?? '127.0.0.1';
     this.log = opts.logger.child('api');
     this.approverId = opts.approverId;
     this.registerRoutes();
@@ -58,17 +69,54 @@ export class ApiServer {
       this.server = createServer((req, res) => {
         void this.handle(req, res);
       });
-      this.server.listen(this.port, () => {
-        this.log.info(`X Bot Console listening on http://localhost:${this.port}`);
+      // The host is explicit. Omitting it makes Node bind every interface,
+      // which would put the kill-switch and approval routes on the local
+      // network from a developer's laptop.
+      this.server.listen(this.port, this.host, () => {
+        const addr = this.server?.address();
+        this.bound = typeof addr === 'object' && addr !== null ? addr.port : this.port;
+        this.log.info('X Bot Console listening', {
+          host: this.host,
+          port: this.bound,
+          url: `http://${this.host === '0.0.0.0' ? 'localhost' : this.host}:${this.bound}`,
+        });
         resolve();
       });
     });
   }
 
+  /** The port actually bound, once listening. */
+  get boundPort(): number | null {
+    return this.bound;
+  }
+
+  /**
+   * Close the console.
+   *
+   * `server.close()` alone waits for every open connection to end, and a
+   * browser tab left on the dashboard holds a keep-alive socket indefinitely —
+   * which would hang shutdown until the platform lost patience and killed the
+   * container mid-task. Idle sockets are closed first, and anything still
+   * hanging on after a short grace is closed outright.
+   */
   async close(): Promise<void> {
     if (!this.server) return;
-    await new Promise<void>((resolve) => this.server!.close(() => resolve()));
+    const server = this.server;
     this.server = null;
+    this.bound = null;
+
+    server.closeIdleConnections();
+    await new Promise<void>((resolve) => {
+      const forced = setTimeout(() => {
+        server.closeAllConnections();
+        resolve();
+      }, 3000);
+      forced.unref?.();
+      server.close(() => {
+        clearTimeout(forced);
+        resolve();
+      });
+    });
   }
 
   /* ------------------------------------------------------------ routes */

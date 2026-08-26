@@ -20,6 +20,8 @@ export interface NorthstarEnv {
   dataDir: string;
   databasePath: string;
   httpPort: number;
+  /** Interface the console binds to. Containers need 0.0.0.0. */
+  httpHost: string;
   logLevel: string;
 
   /** X (Twitter) API v2 bearer token. */
@@ -47,6 +49,15 @@ export interface NorthstarEnv {
    * such. It is never a credential and never reaches a provider.
    */
   universeFile: string | null;
+
+  /**
+   * Whether the deployable process runs the trading loops.
+   *
+   * Defaults ON: a deployment exists to run the bot. Setting it false gives a
+   * console over existing state without the bot acting — for inspecting a
+   * deployment, not for normal operation.
+   */
+  runnerEnabled: boolean;
 }
 
 /**
@@ -91,7 +102,23 @@ export function loadEnv(): NorthstarEnv {
     nodeEnv: str('NODE_ENV', 'development'),
     dataDir,
     databasePath: str('NORTHSTAR_DB_PATH', `${dataDir}/northstar.sqlite`),
-    httpPort: num('NORTHSTAR_PORT', 3737),
+    /*
+     * Port: a PaaS injects PORT and expects the app to honour it. Ours takes
+     * precedence when set explicitly, so a local override still works.
+     */
+    httpPort: num('NORTHSTAR_PORT', num('PORT', 3737)),
+
+    /*
+     * Host: safe locally, correct in a container.
+     *
+     * The console exposes POST routes that kill the bot and approve orders, so
+     * binding every interface on a developer's laptop would put those on the
+     * local network. Containers, however, MUST bind 0.0.0.0 or the platform's
+     * router cannot reach them. The presence of PORT is the signal that we are
+     * in a platform, so that is what the default keys off. NORTHSTAR_HOST
+     * overrides both.
+     */
+    httpHost: str('NORTHSTAR_HOST', raw('PORT') !== null ? '0.0.0.0' : '127.0.0.1'),
     logLevel: str('LOG_LEVEL', 'info'),
 
     xBearerToken: optional('X_BEARER_TOKEN'),
@@ -107,6 +134,8 @@ export function loadEnv(): NorthstarEnv {
     useFixtures: bool('NORTHSTAR_USE_FIXTURES', false),
 
     universeFile: optional('NORTHSTAR_UNIVERSE_FILE'),
+
+    runnerEnabled: bool('NORTHSTAR_RUNNER_ENABLED', true),
   };
 }
 

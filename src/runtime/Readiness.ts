@@ -20,6 +20,7 @@ import {
 import { SCHEMA_VERSION } from '../persistence/schema.js';
 import type { Strategy, TradeProposal, XSignal } from '../domain/types.js';
 import { ReconciliationService } from './Reconciliation.js';
+import { assessStorage } from './StorageCheck.js';
 
 export type CheckStatus = 'PASS' | 'FAIL' | 'WARN' | 'SKIP';
 
@@ -287,6 +288,9 @@ export class ReadinessService {
     /* ------------------------------------- 14. the request budget adds up */
     add(this.requestBudgetCheck());
 
+    /* --------------------------------- 15. the database outlives a restart */
+    add(this.storageCheck());
+
     const passed = checks.filter((c) => c.status === 'PASS').length;
     const failed = checks.filter((c) => c.status === 'FAIL').length;
     const warned = checks.filter((c) => c.status === 'WARN').length;
@@ -497,6 +501,32 @@ export class ReadinessService {
         remedy: 'Run `npm run migrate`.',
       };
     }
+  }
+
+  /**
+   * Does the database survive a redeploy?
+   *
+   * Every other guarantee in this system — the ledger, open positions, polling
+   * cursors, restart recovery — is written to one SQLite file. On an ephemeral
+   * container filesystem that file is destroyed on every deploy, and nothing
+   * else in this report would notice: the database is present, writable and
+   * healthy right up until it is gone.
+   *
+   * It cannot be proven from inside the container, so this WARNs rather than
+   * FAILs — a false FAIL on a correctly-mounted volume would train an operator
+   * to ignore the check that matters most.
+   */
+  private storageCheck(): ReadinessCheck {
+    const storage = assessStorage(this.app.env.databasePath);
+    const status: CheckStatus =
+      storage.verdict === 'LIKELY_EPHEMERAL' || storage.verdict === 'IN_MEMORY' ? 'WARN' : 'PASS';
+    return {
+      id: 'storage-durable',
+      label: 'Database survives a restart',
+      status,
+      detail: storage.detail,
+      ...(storage.remedy === null ? {} : { remedy: storage.remedy }),
+    };
   }
 
   private async probe(opts: {

@@ -1,0 +1,5 @@
+# node:sqlite is the bot's only database, and it does not exist before Node 22.
+# Pinning the toolchain here stops the builder silently selecting an older
+# runtime, where the app would fail at import time rather than at build time.
+[phases.setup]
+nixPkgs = ["nodejs_22"]
