@@ -14,6 +14,7 @@ import type { TradingMode } from '../../src/domain/types.js';
 import { FixtureMarketDataProvider } from '../../src/providers/marketdata/FixtureMarketDataProvider.js';
 import { FixtureSocialProvider, type FixturePost } from '../../src/providers/social/FixtureSocialProvider.js';
 import { SimulatedBrokerProvider } from '../../src/providers/broker/SimulatedBrokerProvider.js';
+import type { BrokerProvider } from '../../src/providers/broker/BrokerProvider.js';
 import { SourceRegistry } from '../../src/providers/social/sourceRegistry.js';
 
 /** Tuesday 10 March 2026, 11:00 New York — the market is open. */
@@ -53,6 +54,13 @@ export interface Harness {
   clock: FixedClock;
   social: FixtureSocialProvider;
   marketData: FixtureMarketDataProvider;
+  /**
+   * The simulated broker.
+   *
+   * Typed concretely because almost every test drives its failure-injection
+   * helpers. A test that substitutes its own broker via `opts.broker` holds its
+   * own reference to it and should use that instead of this field.
+   */
   broker: SimulatedBrokerProvider;
   registry: SourceRegistry;
   close(): void;
@@ -69,6 +77,8 @@ export interface HarnessOptions {
   driftPct?: number;
   liveTradingEnabled?: boolean;
   seed?: boolean;
+  /** Substitute a failure-injecting broker for the simulated one. */
+  broker?: BrokerProvider;
   /** Override operational cadences and rate gates. */
   operations?: Partial<OperationsConfig>;
 }
@@ -85,7 +95,7 @@ export function createHarness(opts: HarnessOptions = {}): Harness {
   }
 
   const social = new FixtureSocialProvider({ clock, registry, posts: opts.posts ?? [] });
-  const broker = new SimulatedBrokerProvider({
+  const broker = opts.broker ?? new SimulatedBrokerProvider({
     clock,
     marketData,
     mode: opts.mode ?? 'PAPER',
@@ -115,7 +125,7 @@ export function createHarness(opts: HarnessOptions = {}): Harness {
     clock,
     social,
     marketData,
-    broker,
+    broker: broker as SimulatedBrokerProvider,
     registry,
     close: () => app.close(),
   };

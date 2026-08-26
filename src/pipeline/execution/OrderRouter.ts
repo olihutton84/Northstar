@@ -33,7 +33,7 @@ import type {
   XSignal,
 } from '../../domain/types.js';
 import type { Store } from '../../persistence/store.js';
-import type { BrokerProvider } from '../../providers/broker/BrokerProvider.js';
+import type { BrokerOrder, BrokerProvider } from '../../providers/broker/BrokerProvider.js';
 import { BrokerError } from '../../providers/broker/BrokerProvider.js';
 import type { MarketDataProvider } from '../../providers/marketdata/MarketDataProvider.js';
 import type { CapitalLedgerService } from '../ledger.js';
@@ -246,18 +246,119 @@ export class OrderRouter {
 
       return { ok: true, order };
     } catch (e) {
-      // Any failure releases the reservation. Leaving cash committed to an
-      // order that never existed is how a ledger drifts.
-      this.ledger.releaseReservation(capital, proposal.proposalId, 'Entry submission failed');
       const detail = e instanceof Error ? e.message : String(e);
+      const kind = e instanceof BrokerError ? e.kind : 'UNKNOWN';
+
+      /*
+       * A definitive rejection is an answer. An ambiguous failure is not.
+       *
+       * When the request times out or the connection drops, the broker may
+       * well have accepted the order — the response is what went missing, not
+       * the order. Booking that as a rejection and releasing the capital
+       * produces the worst outcome available: real exposure that Northstar
+       * does not know it has, never marks, never risk-checks and never exits,
+       * with the reserved dollars freed to be spent a second time.
+       *
+       * So on an ambiguous failure, ask. The client order id was chosen to
+       * make exactly this question answerable.
+       */
+      if (isAmbiguousSubmission(e)) {
+        const enquiry = await this.enquireAfterOrder(clientOrderId);
+
+        if (enquiry.outcome === 'ACCEPTED') {
+          const actual = enquiry.order;
+          order.brokerOrderId = actual.brokerOrderId;
+          order.status = actual.status;
+          order.updatedAt = this.clock.nowIso();
+          this.store.orders.save(order);
+          this.store.proposals.setStatus(proposal.proposalId, 'SUBMITTED');
+          this.log.warn('submission response was lost, but the broker holds the order', {
+            proposalId: proposal.proposalId,
+            clientOrderId,
+            brokerOrderId: actual.brokerOrderId,
+            brokerStatus: actual.status,
+          });
+          this.logDecision(proposal, 'ORDER', `Submission response lost; broker confirmed ${actual.status}`, {
+            orderId: order.orderId,
+            brokerOrderId: actual.brokerOrderId,
+            clientOrderId,
+            recoveredFrom: detail,
+          });
+          // The reservation stands: this order is live.
+          return { ok: true, order };
+        }
+
+        if (enquiry.outcome === 'UNKNOWN') {
+          /*
+           * The broker could not be asked either. The order is recorded as
+           * PENDING with no broker id, which keeps it in the reconciliation
+           * queue: PositionManager looks such orders up by client order id
+           * every cycle and will either adopt the real order or, once the
+           * broker confirms it never existed, cancel it and release the
+           * capital. Until then the dollars stay committed, because the one
+           * thing that must not happen is spending them twice.
+           */
+          order.status = 'PENDING';
+          order.rejectReason = null;
+          order.updatedAt = this.clock.nowIso();
+          this.store.orders.save(order);
+          this.store.proposals.setStatus(proposal.proposalId, 'SUBMITTED');
+          this.log.error('submission outcome unknown; order held pending reconciliation', {
+            proposalId: proposal.proposalId,
+            clientOrderId,
+            detail,
+          });
+          this.logDecision(proposal, 'ORDER', `Submission outcome unknown: ${detail}`, {
+            orderId: order.orderId,
+            clientOrderId,
+            kind,
+            heldPendingReconciliation: true,
+          });
+          return { ok: false, reason: 'BROKER_ERROR', detail: `${detail} (order held pending reconciliation)` };
+        }
+        // enquiry.outcome === 'ABSENT' — the broker answered and has no such
+        // order, so the failure really was a rejection. Fall through.
+      }
+
+      // A definitive failure releases the reservation. Leaving cash committed
+      // to an order that never existed is how a ledger drifts.
+      this.ledger.releaseReservation(capital, proposal.proposalId, 'Entry submission failed');
       order.status = 'REJECTED';
       order.rejectReason = detail;
       order.updatedAt = this.clock.nowIso();
       this.store.orders.save(order);
       this.store.proposals.setStatus(proposal.proposalId, 'FAILED');
       this.log.error('entry submission failed', { proposalId: proposal.proposalId, detail });
-      this.logDecision(proposal, 'ORDER', `Entry submission failed: ${detail}`, { kind: e instanceof BrokerError ? e.kind : 'UNKNOWN' });
+      this.logDecision(proposal, 'ORDER', `Entry submission failed: ${detail}`, { kind });
       return { ok: false, reason: 'BROKER_ERROR', detail };
+    }
+  }
+
+  /**
+   * Ask the broker whether an order it may never have answered about exists.
+   *
+   * The three outcomes are deliberately distinct. "The broker says no" and
+   * "the broker could not be asked" look the same to a `catch` that collapses
+   * them, and they demand opposite actions: one releases capital, the other
+   * must not.
+   */
+  private async enquireAfterOrder(
+    clientOrderId: string,
+  ): Promise<{ outcome: 'ACCEPTED'; order: BrokerOrder } | { outcome: 'ABSENT' | 'UNKNOWN' }> {
+    try {
+      const found = await this.broker.getOrderByClientId(clientOrderId);
+      if (!found) return { outcome: 'ABSENT' };
+      // A broker that answers "rejected" has genuinely rejected it.
+      if (found.status === 'REJECTED' || found.status === 'CANCELLED' || found.status === 'EXPIRED') {
+        return { outcome: 'ABSENT' };
+      }
+      return { outcome: 'ACCEPTED', order: found };
+    } catch (e) {
+      this.log.warn('could not ask the broker about an ambiguous submission', {
+        clientOrderId,
+        detail: e instanceof Error ? e.message : String(e),
+      });
+      return { outcome: 'UNKNOWN' };
     }
   }
 
@@ -499,6 +600,19 @@ export class OrderRouter {
 }
 
 /** Deterministic per-proposal idempotency key. */
+/**
+ * Could this failure have left a live order at the broker?
+ *
+ * Transport-level failures are ambiguous: the order may have been accepted and
+ * only the answer lost. Business-level failures (rejected, insufficient funds,
+ * market closed, duplicate, auth) are answers — the broker replied, and the
+ * reply was no.
+ */
+export function isAmbiguousSubmission(e: unknown): boolean {
+  if (!(e instanceof BrokerError)) return true; // an unrecognised throw is not an answer
+  return e.kind === 'NETWORK' || e.kind === 'UNAVAILABLE' || e.kind === 'RATE_LIMIT' || e.kind === 'BAD_RESPONSE';
+}
+
 export function entryClientOrderId(proposal: TradeProposal): string {
   return `ns-entry-${proposal.proposalId}`;
 }
