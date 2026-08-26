@@ -377,6 +377,7 @@ export class HealthGuard {
       detail,
       paused,
       resolvedAt: null,
+      resolutionNote: '',
     };
     this.store.incidents.save(incident);
     return incident;

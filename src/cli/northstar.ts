@@ -16,6 +16,7 @@
  *   northstar signals [n]        print recent signals with explanations
  *   northstar trace <id>         reconstruct one decision chain end to end
  *   northstar manual <cmd>       operator-supplied X posts (start|add|batch|list|stop)
+ *   northstar incidents [resolve] inspect health incidents; close only stale ones
  *   northstar pause <reason>     stop new entries; exits keep running
  *   northstar kill <reason>      engage the kill switch
  *   northstar resume <note>      clear a pause/kill
@@ -94,6 +95,23 @@ function storageTag(verdict: StorageVerdict): string {
     case 'LIKELY_EPHEMERAL':
       return `${RED}LIKELY EPHEMERAL${RESET}`;
   }
+}
+
+/** One incident, with what is currently true about its cause. */
+function printDiagnosis(d: import('../runtime/IncidentForensics.js').IncidentDiagnosis): void {
+  const i = d.incident;
+  out();
+  out(`${BOLD}${i.fault}${RESET}  ${DIM}${i.incidentId}${RESET}`);
+  out(`  Raised        ${i.at}`);
+  out(`  Condition     ${i.detail}`);
+  out(`  Epoch         ${d.attributedEpochId ?? '(none)'}  ${DIM}${d.attributionDetail}${RESET}`);
+  out(`  Paused the bot ${i.paused ? 'yes' : 'no'}`);
+  if (i.resolvedAt) {
+    out(`  ${GREEN}Resolved      ${i.resolvedAt}${RESET}`);
+    if (i.resolutionNote) out(`  Note          ${i.resolutionNote}`);
+  }
+  out(`  Still present ${d.stillPresent ? `${RED}YES${RESET}` : `${GREEN}no${RESET}`}`);
+  out(`  ${d.stillPresent ? RED : DIM}${d.verdict}${RESET}`);
 }
 
 /** Read a pasted batch from stdin. Empty when nothing is piped in. */
@@ -887,6 +905,55 @@ async function main(): Promise<void> {
     }
 
     /*
+     * Health incidents — inspect, and close only what is genuinely over.
+     *
+     * Read-only by default. Resolution recomputes the fault's condition from
+     * live state and refuses if it still holds, because an incident closed over
+     * a live problem turns a loud fault into a silent one.
+     */
+    case 'incidents': {
+      const app = makeApp('PAPER');
+      app.seed();
+      const sub = args[0] ?? 'list';
+
+      if (sub === 'resolve') {
+        const id = args[1];
+        const note = args.slice(2).filter((a) => !a.startsWith('--')).join(' ');
+        if (!id) {
+          out('Usage: northstar incidents resolve <incidentId> "<why it is historical>"');
+          process.exitCode = 1;
+          app.close();
+          break;
+        }
+        const result = app.forensics.resolve(id, note);
+        out(result.detail);
+        if (result.diagnosis) printDiagnosis(result.diagnosis);
+        if (!result.resolved) process.exitCode = 1;
+        app.close();
+        break;
+      }
+
+      const open = app.forensics.diagnoseOpen();
+      heading('HEALTH INCIDENTS');
+      if (open.length === 0) {
+        out(`${GREEN}No unresolved incidents.${RESET}`);
+      } else {
+        out(`${open.length} unresolved incident(s).`);
+        for (const d of open) printDiagnosis(d);
+      }
+
+      heading('LEDGER INTEGRITY BY EPOCH');
+      for (const e of app.forensics.allEpochIntegrity()) {
+        out(`${e.ok ? GREEN + 'OK  ' : RED + 'FAIL'}${RESET} ${e.epochId.padEnd(16)} ${e.status.padEnd(7)} ` +
+            `${e.detail}`);
+        out(`${DIM}     ${e.entryCount} entries · ${e.openPositions} open position(s) · ` +
+            `${e.openOrders} open order(s)${RESET}`);
+      }
+      app.close();
+      break;
+    }
+
+    /*
      * PAUSE NEW ENTRIES — deliberately not a stop.
      *
      * Exits, fills and reconciliation keep running. A position nobody is
@@ -1102,6 +1169,8 @@ function printHelp(): void {
   manual batch [--file f]  submit a pasted batch (stdin if no file)
   manual list [n]          recent operator-supplied observations
   manual stop "<reason>"   close the experiment early
+  incidents                open incidents, diagnosed, plus ledger integrity per epoch
+  incidents resolve <id> "<note>"   close one, refused while its cause is live
   pause <reason>           PAUSE NEW ENTRIES; exits and reconciliation continue
   resume <note>            allow new entries again
   kill <reason>            EMERGENCY STOP; cancels open orders, keeps positions

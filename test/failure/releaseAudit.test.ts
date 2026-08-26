@@ -587,10 +587,13 @@ describe('readiness never trades', () => {
     const report = await h.app.readiness.run();
 
     assert.equal(report.readyForRealDataPaper, false, 'fixtures can never be READY for real data');
-    assert.match(report.readyForRealDataPaperReason, /fixture/);
+    // The wording covers manual ingest too, so it says "not real data" rather
+    // than "fixture" — the substance is unchanged and checked directly below.
+    assert.match(report.readyForRealDataPaperReason, /not real data/);
 
     const noFixtures = report.checks.find((c) => c.id === 'no-fixtures')!;
     assert.equal(noFixtures.status, 'FAIL');
+    assert.match(noFixtures.detail, /^Not real data: X /, 'and it must name X as the offender');
     h.close();
   });
 });

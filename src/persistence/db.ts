@@ -186,6 +186,19 @@ export class Database {
         }
       }
     }
+
+    if (before < 5) {
+      /*
+       * v5 records WHY an incident was closed.
+       *
+       * Existing rows get an empty note rather than an invented one: nobody
+       * wrote a reason at the time, and pretending otherwise would put words in
+       * an operator's mouth in the audit trail.
+       */
+      if (!this.hasColumn('health_incidents', 'resolution_note')) {
+        this.raw.exec("ALTER TABLE health_incidents ADD COLUMN resolution_note TEXT NOT NULL DEFAULT ''");
+      }
+    }
   }
 
   private hasColumn(table: string, column: string): boolean {

@@ -30,6 +30,7 @@ import { ACTIVE_EPOCH, maxPositionCentsFor, type ExecutionEpochSpec } from './co
 import { assessStorage, type StorageAssessment } from './runtime/StorageCheck.js';
 import { ManualSocialProvider } from './providers/social/ManualSocialProvider.js';
 import { ManualIngestService } from './ingest/ManualIngestService.js';
+import { IncidentForensics } from './runtime/IncidentForensics.js';
 import {
   manualIngestPermitted,
   resolveWindow,
@@ -151,6 +152,8 @@ export class NorthstarApp {
   readonly autonomy: AutonomyGate;
   /** Accepts operator-supplied X posts during the temporary experiment. */
   readonly manualIngest: ManualIngestService;
+  /** Diagnoses health incidents, and refuses to close a live one. */
+  readonly forensics: IncidentForensics;
   readonly scheduler: Scheduler;
   readonly session: SessionWatch;
   readonly funnel: FunnelService;
@@ -340,6 +343,7 @@ export class NorthstarApp {
     this.autonomy = new AutonomyGate(this);
     this.manualIngest = new ManualIngestService(
       this.store, this.clock, this.logger, this.spec.strategyId);
+    this.forensics = new IncidentForensics(this.store, this.clock, this.spec.strategyId);
 
     this.runner = new StrategyRunner({
       autonomy: this.autonomy,

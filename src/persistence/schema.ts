@@ -9,7 +9,7 @@
  * caused it. Nothing is updated destructively except mutable working state
  * (position marks, order status, ledger cash); every decision is append-only.
  */
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 /**
  * Settings, applied before anything else and OUTSIDE any transaction.
@@ -452,7 +452,11 @@ CREATE TABLE IF NOT EXISTS health_incidents (
   at          TEXT NOT NULL,
   detail      TEXT NOT NULL,
   paused      INTEGER NOT NULL DEFAULT 0,
-  resolved_at TEXT
+  resolved_at TEXT,
+  -- Why it was closed. An incident that simply stops being listed teaches
+  -- nobody anything; the note is the difference between "resolved" and
+  -- "someone made it go away".
+  resolution_note TEXT NOT NULL DEFAULT ''
 );
 
 -- ------------------------------------------------------ api telemetry

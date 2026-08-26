@@ -30,6 +30,7 @@
  */
 import type { NorthstarApp } from '../app.js';
 import type { ProviderSummary } from '../app.js';
+import { xPosture } from './dataPosture.js';
 
 export type ExecutionTier = 'SIMULATION' | 'PAPER' | 'LIVE' | 'INCOHERENT';
 
@@ -122,8 +123,9 @@ export class AutonomyGate {
      * refused twice over (here, and at provider construction).
      */
     const manual = this.app.manualIngestPermission();
-    const realX = providers.x === 'LIVE' || (providers.x === 'MANUAL' && manual.permitted);
-    const realData = realX && providers.marketData === 'TIINGO';
+    // The same function readiness uses, so the two cannot form different
+    // beliefs about what the X provider is.
+    const realData = xPosture(providers, manual).realData && providers.marketData === 'TIINGO';
 
     if (simulatedBroker) {
       // Real data into a simulated broker is still simulation: nothing real is
@@ -178,17 +180,12 @@ export class AutonomyGate {
     // point is that the data is not real.
     const needsRealData = tier === 'PAPER' || tier === 'LIVE' || tier === 'INCOHERENT';
     const manualPermission = this.app.manualIngestPermission();
+    const posture = xPosture(providers, manualPermission);
     add(
       'live-x',
       'X data is real',
-      !needsRealData || providers.x === 'LIVE' || (providers.x === 'MANUAL' && manualPermission.permitted),
-      providers.x === 'LIVE'
-        ? 'The X provider is the real API.'
-        : providers.x === 'MANUAL'
-          ? manualPermission.permitted
-            ? `MANUAL REAL POSTS — operator-supplied. ${manualPermission.reason}`
-            : `Manual X posts are not usable: ${manualPermission.reason}`
-          : 'LIVE X DATA REQUIRED — the fixture social provider is active.',
+      !needsRealData || posture.realData,
+      posture.detail,
     );
 
     /*

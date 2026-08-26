@@ -20,6 +20,7 @@ import {
 import { SCHEMA_VERSION } from '../persistence/schema.js';
 import type { Strategy, TradeProposal, XSignal } from '../domain/types.js';
 import { ReconciliationService } from './Reconciliation.js';
+import { realDataConfigured, unrealProviders, xPosture } from './dataPosture.js';
 import { assessStorage } from './StorageCheck.js';
 
 export type CheckStatus = 'PASS' | 'FAIL' | 'WARN' | 'SKIP';
@@ -79,24 +80,42 @@ export class ReadinessService {
     const providers = this.app.describeProviders();
     const strategy = this.app.store.strategies.byId(this.app.spec.strategyId);
 
+    /*
+     * The SAME judgement the autonomy gate makes, from the same function.
+     * Readiness reports and the gate decides, but they may not disagree about
+     * what the X provider is.
+     */
+    const manualPermission = this.app.manualIngestPermission();
+    const posture = xPosture(providers, manualPermission);
+
     /* ------------------------------------------------- 1. credentials */
     const x = xCredentialReport(this.app.env);
     const tiingo = tiingoCredentialReport(this.app.env);
     const alpaca = alpacaPaperCredentialReport();
 
+    /*
+     * The X token is required for the API posture and NOT for an open manual
+     * experiment — which exists precisely because the API costs money. Demanding
+     * it anyway made a correctly-configured experiment unlaunchable.
+     */
+    const xRequired = posture.credentialsRequired;
+    const xCredentialsOk = !xRequired || x.state === 'CONFIGURED';
     const credentialsOk =
-      x.state === 'CONFIGURED' && tiingo.state === 'CONFIGURED' && alpaca.state === 'CONFIGURED';
+      xCredentialsOk && tiingo.state === 'CONFIGURED' && alpaca.state === 'CONFIGURED';
+    const xDetail = xRequired
+      ? `X ${x.state}`
+      : `X NOT REQUIRED — ${posture.label}`;
     add({
       id: 'credentials',
       label: 'Credentials loaded',
       status: credentialsOk ? 'PASS' : 'FAIL',
-      detail: `X ${x.state}, Tiingo ${tiingo.state}, Alpaca PAPER ${alpaca.state}`,
+      detail: `${xDetail}, Tiingo ${tiingo.state}, Alpaca PAPER ${alpaca.state}`,
       ...(credentialsOk
         ? {}
         : {
             remedy:
               'Fill in .env at the repo root: ' +
-              [...x.missing, ...tiingo.missing, ...alpaca.missing].join(', '),
+              [...(xRequired ? x.missing : []), ...tiingo.missing, ...alpaca.missing].join(', '),
           }),
     });
 
@@ -106,7 +125,10 @@ export class ReadinessService {
         id: 'x-reachable',
         label: 'X reachable',
         skipWhen: providers.x !== 'LIVE',
-        skipDetail: 'The fixture social provider is active, so there is nothing to reach.',
+        skipDetail:
+          posture.posture === 'MANUAL_EXPERIMENT'
+            ? 'Operator-supplied posts need no vendor call; there is nothing to reach.'
+            : 'The fixture social provider is active, so there is nothing to reach.',
         probe: () => this.app.social.healthCheck(),
         remedy: 'Check X_BEARER_TOKEN and that the token\'s plan permits GET /2/tweets/search/recent.',
       }),
@@ -248,18 +270,15 @@ export class ReadinessService {
     });
 
     /* -------------------------------- 11. no fixture providers active */
-    const fixtures: string[] = [];
-    if (providers.x !== 'LIVE') fixtures.push(`X (${this.app.social.providerId})`);
-    if (providers.marketData !== 'TIINGO') fixtures.push(`market data (${this.app.marketData.providerId})`);
-    if (!providers.broker.startsWith('ALPACA')) fixtures.push(`broker (${this.app.broker.brokerId})`);
+    const fixtures = unrealProviders(providers, manualPermission);
     add({
       id: 'no-fixtures',
-      label: 'No fixture providers active',
+      label: 'Every provider is real data',
       status: fixtures.length === 0 ? 'PASS' : 'FAIL',
       detail:
         fixtures.length === 0
-          ? 'X, Tiingo and Alpaca are all the real vendor integrations.'
-          : `Still on fixtures: ${fixtures.join(', ')}.`,
+          ? `X is ${posture.label}; Tiingo and Alpaca PAPER are the real vendor integrations.`
+          : `Not real data: ${fixtures.join(', ')}.`,
       ...(fixtures.length === 0
         ? {}
         : {
@@ -308,12 +327,16 @@ export class ReadinessService {
       warned,
       skipped,
       checks,
-      liveDataConfigured: providers.allReal,
+      liveDataConfigured: realDataConfigured(providers, manualPermission),
       summary:
         failed === 0
           ? `READY: ${passed} passed, ${warned} warning(s), ${skipped} skipped. No orders were submitted.`
           : `NOT READY: ${failed} check(s) failed. No orders were submitted.`,
-      ...this.realDataVerdict(failed, providers.allReal, this.app.broker.mode !== 'LIVE' && strategy?.mode !== 'LIVE'),
+      ...this.realDataVerdict(
+        failed,
+        realDataConfigured(providers, manualPermission),
+        this.app.broker.mode !== 'LIVE' && strategy?.mode !== 'LIVE',
+      ),
     };
   }
 
@@ -331,7 +354,7 @@ export class ReadinessService {
   ): { readyForRealDataPaper: boolean; readyForRealDataPaperReason: string } {
     const blockers: string[] = [];
     if (failed > 0) blockers.push(`${failed} readiness check(s) failed`);
-    if (!allReal) blockers.push('at least one provider is still a fixture');
+    if (!allReal) blockers.push('at least one provider is not real data');
     if (!liveOff) blockers.push('LIVE trading is enabled');
 
     return {

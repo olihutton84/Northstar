@@ -882,4 +882,6 @@ export interface HealthIncident {
   /** Whether this incident paused the strategy. */
   paused: boolean;
   resolvedAt: string | null;
+  /** Why it was closed. Empty while open, and for anything closed before v5. */
+  resolutionNote: string;
 }

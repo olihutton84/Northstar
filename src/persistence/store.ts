@@ -1447,10 +1447,13 @@ export class IncidentRepo {
 
   save(i: HealthIncident): void {
     this.db.run(
-      `INSERT INTO health_incidents (incident_id, strategy_id, fault, at, detail, paused, resolved_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(incident_id) DO UPDATE SET resolved_at = excluded.resolved_at`,
+      `INSERT INTO health_incidents (incident_id, strategy_id, fault, at, detail, paused, resolved_at,
+         resolution_note)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(incident_id) DO UPDATE SET resolved_at = excluded.resolved_at,
+         resolution_note = excluded.resolution_note`,
       i.incidentId, i.strategyId, i.fault, i.at, i.detail, boolToInt(i.paused), i.resolvedAt,
+      i.resolutionNote,
     );
   }
 
@@ -1463,6 +1466,7 @@ export class IncidentRepo {
       detail: String(r['detail']),
       paused: intToBool(r['paused']),
       resolvedAt: strOrNull(r['resolved_at']),
+      resolutionNote: String(r['resolution_note'] ?? ''),
     };
   }
 
@@ -1476,6 +1480,25 @@ export class IncidentRepo {
     return this.db
       .all('SELECT * FROM health_incidents WHERE strategy_id = ? ORDER BY at DESC LIMIT ?', strategyId, limit)
       .map(IncidentRepo.map);
+  }
+
+  byId(incidentId: string): HealthIncident | null {
+    const r = this.db.get('SELECT * FROM health_incidents WHERE incident_id = ?', incidentId);
+    return r ? IncidentRepo.map(r) : null;
+  }
+
+  /**
+   * Close ONE incident, with a reason.
+   *
+   * Deliberately separate from `resolveAll`: closing a specific incident is an
+   * operator judgement about a specific fault, and it is recorded as such.
+   */
+  resolveOne(incidentId: string, at: string, note: string): void {
+    this.db.run(
+      `UPDATE health_incidents SET resolved_at = ?, resolution_note = ?
+       WHERE incident_id = ? AND resolved_at IS NULL`,
+      at, note, incidentId,
+    );
   }
 
   resolveAll(strategyId: string, at: string): void {
