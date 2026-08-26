@@ -177,9 +177,41 @@ export class HealthGuard {
   recordSuccess(provider: ProviderKey): void {
     if (this.failures[provider] > 0) {
       this.log.info('provider recovered', { provider, priorFailures: this.failures[provider] });
+      // The recovery closes the outage window. Without a durable record of it,
+      // the day's log shows failures beginning and never ending.
+      this.record('HEALTH', `${provider} recovered after ${this.failures[provider]} consecutive failure(s)`, {
+        provider,
+        event: 'RECOVERED',
+        priorFailures: this.failures[provider],
+        lastFailureAt: this.lastFailure[provider],
+      });
     }
     this.failures[provider] = 0;
     this.lastSuccess[provider] = this.clock.nowIso();
+  }
+
+  /**
+   * Append a durable, timestamped health entry.
+   *
+   * Provider failures used to leave only a stdout warning and an aggregate
+   * counter, so a 429 that did not cross the pause threshold was gone the
+   * moment the process restarted, and the day could not be reconstructed
+   * afterwards. Every failure and every recovery now lands in the append-only
+   * decision log, which is where the rest of the audit trail already lives.
+   */
+  private record(stage: 'HEALTH', summary: string, payload: Record<string, unknown>): void {
+    try {
+      this.store.log.append({
+        correlationId: randomId('health'),
+        strategyId: this.strategyId,
+        stage,
+        subjectId: String(payload['provider'] ?? this.strategyId),
+        summary,
+        payload,
+      });
+    } catch {
+      // Telemetry must never be able to take down the trading loop.
+    }
   }
 
   /**
@@ -191,6 +223,16 @@ export class HealthGuard {
     this.lastFailure[provider] = this.clock.nowIso();
     this.lastFailureDetail[provider] = detail;
     const count = this.failures[provider];
+
+    // Recorded before any pause decision, so even a single transient failure
+    // that the strategy shrugs off is still on the permanent record.
+    this.record('HEALTH', `${provider} failure ${count}: ${detail}`, {
+      provider,
+      event: 'FAILURE',
+      consecutive: count,
+      kind: kind ?? 'UNKNOWN',
+      detail,
+    });
 
     // Authentication failure is never a transient blip: pause immediately.
     if (kind === 'AUTH') {

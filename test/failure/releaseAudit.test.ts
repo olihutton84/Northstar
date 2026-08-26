@@ -34,6 +34,7 @@ import { FixtureSocialProvider, type FixturePost } from '../../src/providers/soc
 import { FixtureMarketDataProvider } from '../../src/providers/marketdata/FixtureMarketDataProvider.js';
 import { SimulatedBrokerProvider } from '../../src/providers/broker/SimulatedBrokerProvider.js';
 import { SourceRegistry } from '../../src/providers/social/sourceRegistry.js';
+import { SocialProviderError } from '../../src/providers/social/SocialDataProvider.js';
 
 const NOW = '2026-03-10T15:00:00.000Z';
 
@@ -459,6 +460,62 @@ describe('Tiingo failure modes', () => {
     assert.equal(h.app.store.orders.all().length, 0);
     const failed = h.app.store.risk.recent(10).flatMap((d) => d.failedChecks);
     assert.ok(failed.includes('MARKET_DATA_FRESHNESS'), 'stale marks must fail the freshness gate every time');
+    h.close();
+  });
+});
+
+/* ------------------------------------------------ 19. first-day recording */
+
+describe('the day must be reconstructable afterwards', () => {
+  it('records a transient API failure durably, not just as a counter', async () => {
+    const h = createHarness({ posts: [bullishTier1Post(), corroboratingTier2Post()] });
+
+    // A single 429 — below the pause threshold, so nothing else would notice.
+    h.social.setFailure(new SocialProviderError('X rate limit exceeded', 'RATE_LIMIT', 60));
+    await h.app.runner.runCycle();
+    h.social.setFailure(null);
+    await h.app.runner.runCycle();
+
+    const health = h.app.store.log.byStage(h.app.spec.strategyId, 'HEALTH', 50);
+    const failure = health.find((e) => (e.payload as Record<string, unknown>)['event'] === 'FAILURE');
+    const recovery = health.find((e) => (e.payload as Record<string, unknown>)['event'] === 'RECOVERED');
+
+    assert.ok(failure, 'the failure must survive the process that saw it');
+    assert.ok(recovery, 'and the recovery must close the outage window');
+    assert.equal((failure!.payload as Record<string, unknown>)['kind'], 'RATE_LIMIT');
+    assert.ok(failure!.at, 'timestamped');
+
+    // A single transient failure must not pause the strategy.
+    assert.equal(h.app.store.strategies.byId(h.app.spec.strategyId)?.runState, 'RUNNING');
+    h.close();
+  });
+
+  it('can reconstruct a trade from the post that caused it', async () => {
+    const h = createHarness({ posts: [bullishTier1Post(), corroboratingTier2Post()] });
+    await h.app.runner.runCycle();
+
+    const signal = h.app.store.signals.recent(1)[0]!;
+    const audit = h.app.audit.audit(signal.signalId);
+
+    assert.ok(audit, 'every signal must be auditable');
+    assert.ok(audit!.outcome.narrative.length > 0, 'with a plain-language narrative');
+    assert.ok(audit!.sources.length > 0, 'naming the posts it came from');
+    assert.ok(audit!.components.length > 0, 'and what each score dimension contributed');
+    assert.ok(audit!.outcome.riskDecision, 'the risk decision that ruled on it');
+    assert.ok(audit!.outcome.riskDecision!.checks.length > 0, 'including every check it ran');
+    assert.ok(audit!.outcome.orders.length > 0, 'and the order it produced');
+    h.close();
+  });
+
+  it('keeps every pipeline stage on the decision log', async () => {
+    const h = createHarness({ posts: [bullishTier1Post(), corroboratingTier2Post()] });
+    await h.app.runner.runCycle();
+    await h.app.positionManager.reconcile();
+
+    const stages = new Set(h.app.store.log.recent(2000).map((l) => l.stage));
+    for (const required of ['INGEST', 'SIGNAL', 'PROPOSAL', 'RISK', 'ORDER'] as const) {
+      assert.ok(stages.has(required), `the ${required} stage must be on the permanent record`);
+    }
     h.close();
   });
 });
