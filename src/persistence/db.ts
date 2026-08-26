@@ -7,7 +7,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { SCHEMA_SQL, SCHEMA_VERSION } from './schema.js';
+import { SCHEMA_INDEXES_SQL, SCHEMA_PRAGMAS, SCHEMA_TABLES_SQL, SCHEMA_VERSION } from './schema.js';
 
 export type Row = Record<string, unknown>;
 
@@ -35,16 +35,61 @@ export class Database {
     this.raw.exec('PRAGMA foreign_keys = ON;');
   }
 
+  /**
+   * Bring the database to the current schema, whatever age it is.
+   *
+   * Three phases, and the ORDER is the whole point:
+   *
+   *   1. TABLES    `CREATE TABLE IF NOT EXISTS` — creates what is missing and
+   *                leaves every existing table untouched, including tables
+   *                missing columns that later versions added.
+   *   2. MIGRATE   the forward steps that add those columns and reshape tables.
+   *   3. INDEXES   created last, so an index can safely name a column that
+   *                phase 2 has only just added.
+   *
+   * Phases 1 and 3 used to be one blob that ran BEFORE phase 2. That made the
+   * bootstrap depend on a migration that had not run yet: upgrading a database
+   * created before manual-X ingest died on
+   * `CREATE INDEX ... ON social_events(source)`, and — because that statement
+   * ran ahead of the migration adding `source` — `migrate` could not repair it
+   * either. The database was stuck, and every command that opened it failed the
+   * same way.
+   *
+   * The whole thing is one transaction, so a migration that fails half way
+   * leaves the database exactly as it was rather than partly upgraded. The
+   * recorded version moves inside that transaction too: a version claiming an
+   * upgrade that did not finish is worse than no version at all.
+   */
   migrate(): void {
-    // Schema first, so a fresh database is complete before anything reads it.
-    // An EXISTING database is not touched by CREATE TABLE IF NOT EXISTS, so
-    // structural changes need the forward steps below as well.
+    // Outside the transaction, and first: journal_mode cannot be set inside one
+    // and foreign_keys is silently ignored inside one.
+    this.raw.exec(SCHEMA_PRAGMAS);
+
     const before = this.schemaVersion();
-    this.raw.exec(SCHEMA_SQL);
-    this.upgradeFrom(before);
-    this.raw
-      .prepare('INSERT INTO schema_meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
-      .run('schema_version', String(SCHEMA_VERSION));
+
+    /*
+     * Refuse to touch a database written by a NEWER build.
+     *
+     * Running old migrations over a newer schema is not an upgrade, it is
+     * corruption with a success message. Stopping costs an operator one
+     * confusing minute; the alternative costs them their ledger.
+     */
+    if (before !== null && before > SCHEMA_VERSION) {
+      throw new Error(
+        `This database is at schema v${before}, but this build only understands v${SCHEMA_VERSION}. ` +
+        'It was written by a newer version of the bot. Update the code rather than downgrading the data.',
+      );
+    }
+
+    this.transaction(() => {
+      this.raw.exec(SCHEMA_TABLES_SQL);
+      this.upgradeFrom(before);
+      this.raw.exec(SCHEMA_INDEXES_SQL);
+      this.raw
+        .prepare(
+          'INSERT INTO schema_meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+        .run('schema_version', String(SCHEMA_VERSION));
+    });
   }
 
   /** The version recorded in the file, or null when the file is new. */
@@ -68,7 +113,7 @@ export class Database {
    * rather than replaced, because they are the record of what actually traded.
    */
   private upgradeFrom(before: number | null): void {
-    if (before === null) return; // fresh database; SCHEMA_SQL already built it
+    if (before === null) return; // fresh database; the table phase already built it
 
     if (before < 3) {
       /*

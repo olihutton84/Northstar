@@ -1,37 +1,16 @@
 /**
- * Northstar persistence schema.
+ * The database schema as it stood at commit d09de27 — the last canonical `main`
+ * before execution epochs and manual-X ingest.
  *
- * The chain
- *   social_events -> filter_results -> ticker_resolutions -> signals ->
- *   proposals -> risk_decisions -> approvals -> orders -> fills ->
- *   positions -> exits -> signal_outcomes
- * is fully linked by id, so any trade can be reconstructed from the post that
- * caused it. Nothing is updated destructively except mutable working state
- * (position marks, order status, ledger cash); every decision is append-only.
+ * Frozen here on purpose. The upgrade test needs a database built the way the
+ * OLD code really built one, and reconstructing that from the current schema
+ * would test the current schema against itself and prove nothing. This is a
+ * verbatim copy; it must never be "kept in sync" with the live schema.
  */
-export const SCHEMA_VERSION = 4;
-
-/**
- * Settings, applied before anything else and OUTSIDE any transaction.
- *
- * `journal_mode` cannot be changed inside a transaction at all, and
- * `foreign_keys` is silently ignored inside one. Bundling them with the DDL
- * would make both depend on whether a migration happened to be running.
- */
-export const SCHEMA_PRAGMAS = `
+export const SCHEMA_V2_SQL = `
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
-`;
 
-/**
- * Tables only.
- *
- * Safe to run against a database of ANY age: every statement is
- * `CREATE TABLE IF NOT EXISTS`, so an existing table is left exactly as it is
- * — including when it is missing columns a later version added. Those are the
- * migration's job, and the migration runs after this.
- */
-export const SCHEMA_TABLES_SQL = `
 CREATE TABLE IF NOT EXISTS schema_meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -50,6 +29,7 @@ CREATE TABLE IF NOT EXISTS securities (
   universe_sources_json TEXT NOT NULL DEFAULT '[]',
   active             INTEGER NOT NULL DEFAULT 1
 );
+CREATE INDEX IF NOT EXISTS idx_securities_ticker ON securities(ticker);
 
 -- ---------------------------------------------------------------- sources
 CREATE TABLE IF NOT EXISTS social_authors (
@@ -65,6 +45,7 @@ CREATE TABLE IF NOT EXISTS social_authors (
   baseline_engagement   REAL NOT NULL DEFAULT 0,
   updated_at            TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_authors_handle ON social_authors(lower(handle));
 
 -- ---------------------------------------------------------- social events
 CREATE TABLE IF NOT EXISTS social_events (
@@ -88,13 +69,11 @@ CREATE TABLE IF NOT EXISTS social_events (
   resolved_security_ids_json TEXT NOT NULL DEFAULT '[]',
   engagement_json      TEXT NOT NULL DEFAULT '{}',
   author_baseline_engagement REAL,
-  ingest_batch_id      TEXT NOT NULL,
-  -- Where the observation came from, and how it got here. An event that was
-  -- typed in by an operator must never be indistinguishable from one the API
-  -- returned, however identical its text.
-  source               TEXT NOT NULL DEFAULT 'X_API',
-  provenance           TEXT NOT NULL DEFAULT 'VENDOR_API'
+  ingest_batch_id      TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_events_posted_at ON social_events(posted_at);
+CREATE INDEX IF NOT EXISTS idx_events_batch ON social_events(ingest_batch_id);
+CREATE INDEX IF NOT EXISTS idx_events_author ON social_events(author_id);
 
 CREATE TABLE IF NOT EXISTS filter_results (
   event_id    TEXT PRIMARY KEY REFERENCES social_events(event_id),
@@ -105,6 +84,7 @@ CREATE TABLE IF NOT EXISTS filter_results (
   notes_json  TEXT NOT NULL DEFAULT '[]',
   created_at  TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_filter_dedup ON filter_results(dedup_key);
 
 CREATE TABLE IF NOT EXISTS ticker_resolutions (
   resolution_id TEXT PRIMARY KEY,
@@ -119,6 +99,7 @@ CREATE TABLE IF NOT EXISTS ticker_resolutions (
   created_at    TEXT NOT NULL,
   UNIQUE(event_id, security_id)
 );
+CREATE INDEX IF NOT EXISTS idx_resolutions_security ON ticker_resolutions(security_id);
 
 -- --------------------------------------------------------------- strategy
 CREATE TABLE IF NOT EXISTS strategies (
@@ -173,6 +154,8 @@ CREATE TABLE IF NOT EXISTS signals (
   independent_source_count REAL NOT NULL,
   resolution_confidence REAL NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_signals_generated ON signals(generated_at);
+CREATE INDEX IF NOT EXISTS idx_signals_security ON signals(security_id, generated_at);
 
 -- -------------------------------------------------------------- proposals
 CREATE TABLE IF NOT EXISTS trade_proposals (
@@ -201,6 +184,7 @@ CREATE TABLE IF NOT EXISTS trade_proposals (
   approval_fingerprint TEXT NOT NULL,
   correlation_id   TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_proposals_status ON trade_proposals(status, created_at);
 
 CREATE TABLE IF NOT EXISTS risk_decisions (
   risk_decision_id TEXT PRIMARY KEY,
@@ -214,6 +198,7 @@ CREATE TABLE IF NOT EXISTS risk_decisions (
   decided_at       TEXT NOT NULL,
   summary          TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_risk_proposal ON risk_decisions(proposal_id);
 
 CREATE TABLE IF NOT EXISTS approvals (
   approval_id  TEXT PRIMARY KEY,
@@ -224,13 +209,13 @@ CREATE TABLE IF NOT EXISTS approvals (
   approval_fingerprint TEXT NOT NULL,
   note         TEXT NOT NULL DEFAULT ''
 );
+CREATE INDEX IF NOT EXISTS idx_approvals_proposal ON approvals(proposal_id);
 
 -- ----------------------------------------------------------------- orders
 CREATE TABLE IF NOT EXISTS orders (
   order_id        TEXT PRIMARY KEY,
   broker_order_id TEXT,
   strategy_id     TEXT NOT NULL,
-  epoch_id        TEXT NOT NULL DEFAULT '',
   proposal_id     TEXT,
   position_id     TEXT,
   security_id     TEXT NOT NULL,
@@ -251,6 +236,8 @@ CREATE TABLE IF NOT EXISTS orders (
   intent          TEXT NOT NULL,
   correlation_id  TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status, submitted_at);
+CREATE INDEX IF NOT EXISTS idx_orders_proposal ON orders(proposal_id);
 
 CREATE TABLE IF NOT EXISTS fills (
   fill_id         TEXT PRIMARY KEY,
@@ -265,13 +252,13 @@ CREATE TABLE IF NOT EXISTS fills (
   filled_at       TEXT NOT NULL,
   partial         INTEGER NOT NULL DEFAULT 0
 );
+CREATE INDEX IF NOT EXISTS idx_fills_order ON fills(order_id);
 
 -- -------------------------------------------------------------- positions
 CREATE TABLE IF NOT EXISTS positions (
   position_id      TEXT PRIMARY KEY,
   strategy_id      TEXT NOT NULL,
   strategy_version TEXT NOT NULL,
-  epoch_id         TEXT NOT NULL DEFAULT '',
   security_id      TEXT NOT NULL,
   ticker           TEXT NOT NULL,
   direction        TEXT NOT NULL,
@@ -299,73 +286,12 @@ CREATE TABLE IF NOT EXISTS positions (
   fees_cents       INTEGER NOT NULL DEFAULT 0,
   mode             TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(strategy_id, status);
+CREATE INDEX IF NOT EXISTS idx_positions_security ON positions(strategy_id, security_id, status);
 
 -- ----------------------------------------------------------------- ledger
--- ---------------------------------------------------- manual X observations
--- Real, public X posts transcribed by an operator during the temporary
--- manual-ingest experiment. Deduplicated on post_id: the same post pasted
--- twice, in any URL spelling, is one observation.
-CREATE TABLE IF NOT EXISTS manual_observations (
-  observation_id   TEXT PRIMARY KEY,
-  post_id          TEXT NOT NULL UNIQUE,
-  canonical_url    TEXT NOT NULL,
-  submitted_url    TEXT NOT NULL,
-  handle           TEXT NOT NULL,
-  display_name     TEXT NOT NULL,
-  text             TEXT NOT NULL,
-  posted_at        TEXT NOT NULL,
-  captured_at      TEXT NOT NULL,
-  submitted_by     TEXT NOT NULL,
-  source           TEXT NOT NULL DEFAULT 'X_MANUAL',
-  provenance       TEXT NOT NULL DEFAULT 'MANUAL_OPERATOR_SUPPLIED',
-  engagement_json  TEXT NOT NULL DEFAULT '{}',
-  follower_count   INTEGER,
-  verified         INTEGER NOT NULL DEFAULT 0,
-  note             TEXT NOT NULL DEFAULT '',
-  -- PENDING until a scan picks it up; INGESTED once it has become an event.
-  status           TEXT NOT NULL DEFAULT 'PENDING',
-  ingested_at      TEXT,
-  event_id         TEXT
-);
-
--- The experiment window itself. One row per run; the expiry is NOT stored,
--- it is computed from started_at and a ceiling that lives in code, so editing
--- this table cannot extend the experiment.
-CREATE TABLE IF NOT EXISTS manual_ingest_windows (
-  window_id     TEXT PRIMARY KEY,
-  strategy_id   TEXT NOT NULL,
-  started_at    TEXT NOT NULL,
-  started_by    TEXT NOT NULL,
-  note          TEXT NOT NULL DEFAULT '',
-  ended_at      TEXT,
-  ended_reason  TEXT
-);
-
--- ------------------------------------------------------- execution epochs
--- An epoch is one clean run of capital. Capital is an EXECUTION setting and
--- deliberately lives here rather than in the frozen strategy version, so the
--- allocation can change without republishing the strategy. Each epoch owns its
--- own ledger; superseding one never edits it.
-CREATE TABLE IF NOT EXISTS execution_epochs (
-  epoch_id              TEXT PRIMARY KEY,
-  strategy_id           TEXT NOT NULL,
-  label                 TEXT NOT NULL,
-  capital_cents         INTEGER NOT NULL,
-  status                TEXT NOT NULL,
-  started_at            TEXT NOT NULL,
-  ended_at              TEXT,
-  strategy_version      TEXT NOT NULL,
-  strategy_fingerprint  TEXT NOT NULL,
-  universe_version      TEXT NOT NULL DEFAULT '',
-  universe_origin       TEXT NOT NULL DEFAULT '',
-  universe_fingerprint  TEXT NOT NULL DEFAULT '',
-  config_snapshot_json  TEXT NOT NULL DEFAULT '{}',
-  rationale             TEXT NOT NULL DEFAULT ''
-);
-
 CREATE TABLE IF NOT EXISTS capital_ledger (
-  strategy_id             TEXT NOT NULL,
-  epoch_id                TEXT NOT NULL DEFAULT '',
+  strategy_id             TEXT PRIMARY KEY,
   starting_capital_cents  INTEGER NOT NULL,
   cash_cents              INTEGER NOT NULL,
   reserved_cents          INTEGER NOT NULL DEFAULT 0,
@@ -375,16 +301,12 @@ CREATE TABLE IF NOT EXISTS capital_ledger (
   fees_paid_cents         INTEGER NOT NULL DEFAULT 0,
   equity_cents            INTEGER NOT NULL,
   high_water_equity_cents INTEGER NOT NULL,
-  updated_at              TEXT NOT NULL,
-  -- Composite: one ledger per epoch, so a new epoch cannot overwrite the run
-  -- before it.
-  PRIMARY KEY (strategy_id, epoch_id)
+  updated_at              TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS ledger_entries (
   entry_id        TEXT PRIMARY KEY,
   strategy_id     TEXT NOT NULL,
-  epoch_id        TEXT NOT NULL DEFAULT '',
   at              TEXT NOT NULL,
   kind            TEXT NOT NULL,
   amount_cents    INTEGER NOT NULL,
@@ -392,6 +314,7 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
   reference       TEXT NOT NULL,
   note            TEXT NOT NULL DEFAULT ''
 );
+CREATE INDEX IF NOT EXISTS idx_ledger_entries ON ledger_entries(strategy_id, at);
 
 CREATE TABLE IF NOT EXISTS equity_snapshots (
   snapshot_id   TEXT PRIMARY KEY,
@@ -403,6 +326,7 @@ CREATE TABLE IF NOT EXISTS equity_snapshots (
   benchmark_price REAL,
   UNIQUE(strategy_id, at)
 );
+CREATE INDEX IF NOT EXISTS idx_equity_at ON equity_snapshots(strategy_id, at);
 
 -- -------------------------------------------------------------- analytics
 CREATE TABLE IF NOT EXISTS signal_outcomes (
@@ -423,6 +347,7 @@ CREATE TABLE IF NOT EXISTS signal_outcomes (
   hit           INTEGER,
   UNIQUE(signal_id, horizon)
 );
+CREATE INDEX IF NOT EXISTS idx_outcomes_pending ON signal_outcomes(measured_at, horizon);
 
 CREATE TABLE IF NOT EXISTS survival_metrics (
   metrics_id       TEXT PRIMARY KEY,
@@ -431,6 +356,7 @@ CREATE TABLE IF NOT EXISTS survival_metrics (
   as_of            TEXT NOT NULL,
   payload_json     TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_survival_asof ON survival_metrics(strategy_id, as_of);
 
 -- ---------------------------------------------------------- decision log
 CREATE TABLE IF NOT EXISTS decision_log (
@@ -443,6 +369,8 @@ CREATE TABLE IF NOT EXISTS decision_log (
   summary        TEXT NOT NULL,
   payload_json   TEXT NOT NULL DEFAULT '{}'
 );
+CREATE INDEX IF NOT EXISTS idx_log_correlation ON decision_log(correlation_id, at);
+CREATE INDEX IF NOT EXISTS idx_log_stage ON decision_log(strategy_id, stage, at);
 
 -- -------------------------------------------------------------- incidents
 CREATE TABLE IF NOT EXISTS health_incidents (
@@ -454,6 +382,7 @@ CREATE TABLE IF NOT EXISTS health_incidents (
   paused      INTEGER NOT NULL DEFAULT 0,
   resolved_at TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_incidents_open ON health_incidents(strategy_id, resolved_at);
 
 -- ------------------------------------------------------ api telemetry
 -- Durable per-day counters, so a restart does not reset today's usage and the
@@ -501,52 +430,4 @@ CREATE TABLE IF NOT EXISTS price_bars (
 );
 `;
 
-/**
- * Indexes, applied LAST — after the migrations.
- *
- * This ordering is load-bearing, not tidiness. An index names the columns it
- * covers, so an index on a column a migration adds cannot be created until that
- * migration has run. Creating indexes alongside the tables meant an upgrade of
- * an existing database died on `CREATE INDEX ... ON social_events(source)`
- * before the migration adding `source` could execute — and because that ran
- * first, the migration could never repair it. Every new index goes here.
- */
-export const SCHEMA_INDEXES_SQL = `
-CREATE INDEX IF NOT EXISTS idx_securities_ticker ON securities(ticker);
-CREATE INDEX IF NOT EXISTS idx_authors_handle ON social_authors(lower(handle));
-CREATE INDEX IF NOT EXISTS idx_events_source ON social_events(source);
-CREATE INDEX IF NOT EXISTS idx_events_posted_at ON social_events(posted_at);
-CREATE INDEX IF NOT EXISTS idx_events_batch ON social_events(ingest_batch_id);
-CREATE INDEX IF NOT EXISTS idx_events_author ON social_events(author_id);
-CREATE INDEX IF NOT EXISTS idx_filter_dedup ON filter_results(dedup_key);
-CREATE INDEX IF NOT EXISTS idx_resolutions_security ON ticker_resolutions(security_id);
-CREATE INDEX IF NOT EXISTS idx_signals_generated ON signals(generated_at);
-CREATE INDEX IF NOT EXISTS idx_signals_security ON signals(security_id, generated_at);
-CREATE INDEX IF NOT EXISTS idx_proposals_status ON trade_proposals(status, created_at);
-CREATE INDEX IF NOT EXISTS idx_risk_proposal ON risk_decisions(proposal_id);
-CREATE INDEX IF NOT EXISTS idx_approvals_proposal ON approvals(proposal_id);
-CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status, submitted_at);
-CREATE INDEX IF NOT EXISTS idx_orders_proposal ON orders(proposal_id);
-CREATE INDEX IF NOT EXISTS idx_fills_order ON fills(order_id);
-CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(strategy_id, status);
-CREATE INDEX IF NOT EXISTS idx_positions_security ON positions(strategy_id, security_id, status);
-CREATE INDEX IF NOT EXISTS idx_manual_status ON manual_observations(status, posted_at);
-CREATE INDEX IF NOT EXISTS idx_manual_windows ON manual_ingest_windows(strategy_id, started_at);
-CREATE INDEX IF NOT EXISTS idx_epochs_strategy ON execution_epochs(strategy_id, status);
-CREATE INDEX IF NOT EXISTS idx_ledger_entries ON ledger_entries(strategy_id, at);
-CREATE INDEX IF NOT EXISTS idx_equity_at ON equity_snapshots(strategy_id, at);
-CREATE INDEX IF NOT EXISTS idx_outcomes_pending ON signal_outcomes(measured_at, horizon);
-CREATE INDEX IF NOT EXISTS idx_survival_asof ON survival_metrics(strategy_id, as_of);
-CREATE INDEX IF NOT EXISTS idx_log_correlation ON decision_log(correlation_id, at);
-CREATE INDEX IF NOT EXISTS idx_log_stage ON decision_log(strategy_id, stage, at);
-CREATE INDEX IF NOT EXISTS idx_incidents_open ON health_incidents(strategy_id, resolved_at);
-`;
-
-/**
- * The whole schema in dependency order, for creating a database from nothing.
- *
- * An EXISTING database must not be built with this: it skips the migration step
- * that sits between the tables and the indexes. Use `Database.migrate()`.
- */
-export const SCHEMA_SQL = [SCHEMA_PRAGMAS, SCHEMA_TABLES_SQL, SCHEMA_INDEXES_SQL].join('\n');
-
+export const SCHEMA_V2_VERSION = 2;
