@@ -35,6 +35,7 @@ import { FixtureMarketDataProvider } from '../../src/providers/marketdata/Fixtur
 import { SimulatedBrokerProvider } from '../../src/providers/broker/SimulatedBrokerProvider.js';
 import { SourceRegistry } from '../../src/providers/social/sourceRegistry.js';
 import { SocialProviderError } from '../../src/providers/social/SocialDataProvider.js';
+import { BrokerError } from '../../src/providers/broker/BrokerProvider.js';
 
 const NOW = '2026-03-10T15:00:00.000Z';
 
@@ -570,6 +571,129 @@ describe('readiness never trades', () => {
 
     const noFixtures = report.checks.find((c) => c.id === 'no-fixtures')!;
     assert.equal(noFixtures.status, 'FAIL');
+    h.close();
+  });
+});
+
+/* ------------------------------------------------- 5. duplicate vectors */
+
+describe('duplicate trading is impossible through every route', () => {
+  async function opened() {
+    const h = createHarness({ posts: [bullishTier1Post(), corroboratingTier2Post()] });
+    await h.app.runner.runCycle();
+    const entries = () => h.app.store.orders.all().filter((o) => o.intent === 'ENTRY').length;
+    assert.equal(entries(), 1, 'the first cycle opened exactly one entry');
+    return { h, entries };
+  }
+
+  it('ignores the identical post arriving again', async () => {
+    const { h, entries } = await opened();
+    h.social.setPosts([bullishTier1Post(), corroboratingTier2Post()]);
+    h.clock.advanceMinutes(2);
+    await h.app.runner.runCycle();
+    assert.equal(entries(), 1);
+    h.close();
+  });
+
+  it('ignores a repost of the same story by another account', async () => {
+    const { h, entries } = await opened();
+    h.clock.advanceMinutes(2);
+    h.social.addPosts([
+      bullishTier1Post({
+        postId: 'echo-1',
+        handle: 'randomguy',
+        kind: 'REPOST',
+        referencedPostId: 'post-nvda-guidance-1',
+      }),
+    ]);
+    await h.app.runner.runCycle();
+    assert.equal(entries(), 1, 'an echo is not new information');
+    h.close();
+  });
+
+  it('is idempotent across a duplicate cycle with the clock unmoved', async () => {
+    const { h, entries } = await opened();
+    await h.app.runner.runCycle();
+    assert.equal(entries(), 1);
+    h.close();
+  });
+
+  it('refuses the same proposal submitted twice through the router', async () => {
+    const { h } = await opened();
+    const proposal = h.app.store.proposals.recent(1)[0]!;
+    const decision = h.app.store.risk.recent(1)[0]!;
+    const signal = h.app.store.signals.byId(proposal.signalId)!;
+
+    const again = await h.app.orderRouter.submitEntry(proposal, decision, signal);
+    assert.equal(again.ok, false);
+    assert.equal(again.ok === false && again.reason, 'DUPLICATE');
+    h.close();
+  });
+
+  it('opens exactly one position across ten consecutive scans of one story', async () => {
+    const { h, entries } = await opened();
+    for (let i = 0; i < 10; i += 1) {
+      h.clock.advanceMinutes(2);
+      await h.app.runner.runCycle();
+    }
+    assert.equal(entries(), 1);
+    assert.equal(h.app.store.positions.open(h.app.spec.strategyId).length, 1);
+    h.close();
+  });
+});
+
+/* ------------------------------------------- 9. exits must never orphan */
+
+describe('an exit is never permanently disarmed', () => {
+  async function losing() {
+    const h = createHarness({ posts: [bullishTier1Post(), corroboratingTier2Post()] });
+    await h.app.runner.runCycle();
+    const position = h.app.store.positions.open(h.app.spec.strategyId)[0]!;
+    // Well through the stop loss.
+    h.marketData.setPrice(position.ticker, position.entryPrice * 0.8);
+    return { h, position };
+  }
+
+  it('holds the exit while the market is closed, then fires it at the open', async () => {
+    const { h, position } = await losing();
+    h.marketData.setMarketOpen(false);
+    h.broker.setMarketOpen(false);
+    h.clock.advanceMinutes(5);
+    await h.app.runner.monitorPositions();
+
+    assert.equal(h.app.store.positions.byId(position.positionId)?.status, 'OPEN', 'nothing executes while closed');
+
+    h.marketData.setMarketOpen(true);
+    h.broker.setMarketOpen(true);
+    h.clock.advanceMinutes(5);
+    await h.app.runner.monitorPositions();
+    await h.app.positionManager.reconcile();
+
+    const after = h.app.store.positions.byId(position.positionId)!;
+    assert.equal(after.status, 'CLOSED', 'the stop must fire once the market reopens');
+    assert.equal(after.exitReason, 'STOP_LOSS');
+    assert.ok(h.app.ledger.verifyIntegrity().ok);
+    h.close();
+  });
+
+  it('retries an exit the broker rejected, and closes once it recovers', async () => {
+    const { h, position } = await losing();
+    h.broker.setSubmitFailure(new BrokerError('exit bounced', 'REJECTED'));
+    h.clock.advanceMinutes(5);
+    await h.app.runner.monitorPositions();
+
+    assert.equal(h.app.store.positions.byId(position.positionId)?.status, 'OPEN');
+
+    h.broker.setSubmitFailure(null);
+    h.clock.advanceMinutes(5);
+    await h.app.runner.monitorPositions();
+    await h.app.positionManager.reconcile();
+
+    const after = h.app.store.positions.byId(position.positionId)!;
+    assert.equal(after.status, 'CLOSED', 'a bounced stop-loss must be retried, not abandoned');
+    const attempts = h.app.store.orders.byPosition(position.positionId).filter((o) => o.intent === 'EXIT');
+    assert.equal(attempts.length, 2, 'the retry is a distinct, recorded attempt');
+    assert.ok(h.app.ledger.verifyIntegrity().ok);
     h.close();
   });
 });

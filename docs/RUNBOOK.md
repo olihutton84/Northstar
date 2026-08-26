@@ -81,7 +81,7 @@ the frozen strategy version:
 | `NORTHSTAR_X_EVENT_WATCH_SECONDS` | 60 | cadence while a story develops |
 | `NORTHSTAR_X_EVENT_WATCH_MINUTES` | 12 | how long a watch lasts |
 | `NORTHSTAR_X_PRESSURE_SECONDS` | 300 | cadence under API pressure |
-| `NORTHSTAR_X_DAILY_SOFT_CAP` | 400 | request budget before slowing down |
+| `NORTHSTAR_X_DAILY_SOFT_CAP` | 900 | runaway guard; polling slows above it |
 | `NORTHSTAR_POSITION_MONITOR_SECONDS` | 60 | mark/exit/fill cadence |
 | `NORTHSTAR_RECONCILE_SECONDS` | 180 | broker reconciliation cadence |
 | `NORTHSTAR_QUOTE_CACHE_SECONDS` | 45 | quote reuse window |
@@ -92,10 +92,26 @@ the frozen strategy version:
 
 ### Expected X usage
 
-At the defaults, roughly **215 requests** across a 6.5-hour session: about 195
-baseline scans plus the event-watch fraction, one batched query each. Cursors
-mean each scan asks for posts *newer than the last one seen* rather than
-re-downloading the window, so the cost does not grow with the size of the
+The seeded 29-name universe packs into **2 batched query chunks**, so one scan
+costs 2 requests, not 1:
+
+| | polls | x requests/poll | = requests/day |
+|---|---|---|---|
+| quiet day (no event watch) | 195 | 2 | **390** |
+| normal day (10% event watch) | 215 | 2 | **430** |
+| busy day (25% event watch) | 244 | 2 | **488** |
+
+against a `NORTHSTAR_X_DAILY_SOFT_CAP` of **900**, which is a runaway guard
+rather than a normal-operation throttle — it clears a heavy day with headroom
+while still catching a polling bug within minutes.
+
+The chunk count is not assumed anywhere: the banner, the dashboard and the
+`X request budget adds up` readiness check all ask the constructed provider
+what one scan really costs, so growing the universe past the 1024-character
+query limit shows up as a higher number rather than a surprise mid-morning.
+
+Cursors mean each scan asks for posts *newer than the last one seen* rather
+than re-downloading the window, so the cost does not grow with the size of the
 universe's recent history.
 
 Check it during the day:
