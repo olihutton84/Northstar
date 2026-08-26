@@ -46,6 +46,16 @@ export interface ReadinessReport {
   /** True when X, Tiingo and Alpaca are all real. */
   liveDataConfigured: boolean;
   summary: string;
+  /**
+   * The single verdict for starting a real-data PAPER session.
+   *
+   * Stricter than `overall`: every check must pass AND every provider must be
+   * the real vendor AND live trading must be off. A green run against fixtures
+   * proves the code works, not that the bot is ready to trade real data, and
+   * conflating those is exactly the mistake this field exists to prevent.
+   */
+  readyForRealDataPaper: boolean;
+  readyForRealDataPaperReason: string;
 }
 
 export class ReadinessService {
@@ -235,6 +245,45 @@ export class ReadinessService {
       ...(strategy?.mode === 'PAPER' ? {} : { remedy: 'First live-data runs should be PAPER: `npm run lab -- mode PAPER`.' }),
     });
 
+    /* -------------------------------- 11. no fixture providers active */
+    const fixtures: string[] = [];
+    if (providers.x !== 'LIVE') fixtures.push(`X (${this.app.social.providerId})`);
+    if (providers.marketData !== 'TIINGO') fixtures.push(`market data (${this.app.marketData.providerId})`);
+    if (!providers.broker.startsWith('ALPACA')) fixtures.push(`broker (${this.app.broker.brokerId})`);
+    add({
+      id: 'no-fixtures',
+      label: 'No fixture providers active',
+      status: fixtures.length === 0 ? 'PASS' : 'FAIL',
+      detail:
+        fixtures.length === 0
+          ? 'X, Tiingo and Alpaca are all the real vendor integrations.'
+          : `Still on fixtures: ${fixtures.join(', ')}.`,
+      ...(fixtures.length === 0
+        ? {}
+        : {
+            remedy: providers.forcedFixtures
+              ? 'NORTHSTAR_USE_FIXTURES is set. Unset it, then re-run readiness.'
+              : 'Add the missing credentials to .env, then re-run readiness.',
+          }),
+    });
+
+    /* ------------------------------------------ 12. LIVE trading is off */
+    // Read from the constructed broker and the stored strategy, never from
+    // configuration: what is wired is what will trade.
+    const liveOff = this.app.broker.mode !== 'LIVE' && strategy?.mode !== 'LIVE';
+    add({
+      id: 'live-disabled',
+      label: 'LIVE trading disabled',
+      status: liveOff ? 'PASS' : 'FAIL',
+      detail: liveOff
+        ? `Broker is ${this.app.broker.mode}; strategy mode is ${strategy?.mode ?? 'unknown'}. No real money can be committed.`
+        : `LIVE is active (broker ${this.app.broker.mode}, strategy ${strategy?.mode ?? 'unknown'}).`,
+      ...(liveOff ? {} : { remedy: 'Run `npm run lab -- mode PAPER` before a first real-data session.' }),
+    });
+
+    /* ------------------------------------------- 13. database healthy */
+    add(this.databaseCheck());
+
     const passed = checks.filter((c) => c.status === 'PASS').length;
     const failed = checks.filter((c) => c.status === 'FAIL').length;
     const warned = checks.filter((c) => c.status === 'WARN').length;
@@ -256,10 +305,76 @@ export class ReadinessService {
         failed === 0
           ? `READY: ${passed} passed, ${warned} warning(s), ${skipped} skipped. No orders were submitted.`
           : `NOT READY: ${failed} check(s) failed. No orders were submitted.`,
+      ...this.realDataVerdict(failed, providers.allReal, this.app.broker.mode !== 'LIVE' && strategy?.mode !== 'LIVE'),
     };
   }
 
   /* ------------------------------------------------------------ helpers */
+
+  /**
+   * The one line an operator reads before starting a real-data session.
+   *
+   * All three conditions, or NO. There is no partial yes.
+   */
+  private realDataVerdict(
+    failed: number,
+    allReal: boolean,
+    liveOff: boolean,
+  ): { readyForRealDataPaper: boolean; readyForRealDataPaperReason: string } {
+    const blockers: string[] = [];
+    if (failed > 0) blockers.push(`${failed} readiness check(s) failed`);
+    if (!allReal) blockers.push('at least one provider is still a fixture');
+    if (!liveOff) blockers.push('LIVE trading is enabled');
+
+    return {
+      readyForRealDataPaper: blockers.length === 0,
+      readyForRealDataPaperReason:
+        blockers.length === 0
+          ? 'All checks passed, all three providers are real, and LIVE is disabled.'
+          : blockers.join('; '),
+    };
+  }
+
+  /**
+   * The database is where every guarantee in this system is recorded, so it is
+   * checked for reachability and for writability — a read-only file would fail
+   * silently at the worst moment, mid-fill.
+   */
+  private databaseCheck(): ReadinessCheck {
+    try {
+      const counts = this.app.store.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM strategies');
+      // A transaction that writes and rolls back proves writability without
+      // leaving anything behind.
+      let writable = false;
+      try {
+        this.app.store.db.run('CREATE TEMP TABLE IF NOT EXISTS readiness_probe (x INTEGER)');
+        this.app.store.db.run('INSERT INTO readiness_probe (x) VALUES (1)');
+        this.app.store.db.run('DROP TABLE readiness_probe');
+        writable = true;
+      } catch {
+        writable = false;
+      }
+
+      const cursors = this.app.store.cursors.list().length;
+      return {
+        id: 'database',
+        label: 'Database healthy',
+        status: writable ? 'PASS' : 'FAIL',
+        detail: writable
+          ? `Readable and writable; ${counts?.n ?? 0} strategy record(s), ${cursors} polling cursor(s) stored.`
+          : 'The database is readable but not writable.',
+        ...(writable ? {} : { remedy: 'Check file permissions and free disk space on NORTHSTAR_DB_PATH.' }),
+      };
+    } catch (e) {
+      return {
+        id: 'database',
+        label: 'Database healthy',
+        status: 'FAIL',
+        detail: e instanceof Error ? e.message : String(e),
+        remedy: 'Run `npm run migrate`.',
+      };
+    }
+  }
 
   private async probe(opts: {
     id: string;

@@ -48,7 +48,7 @@ import { PostFilter } from '../pipeline/filtering.js';
 import { IngestionService } from '../pipeline/ingestion.js';
 import { CapitalLedgerService } from '../pipeline/ledger.js';
 import { ProposalBuilder } from '../pipeline/proposal.js';
-import { RiskEngine } from '../pipeline/risk.js';
+import type { RiskEngine } from '../pipeline/risk.js';
 import { XSignalEngine } from '../pipeline/signal/SignalEngine.js';
 import { TickerResolver } from '../pipeline/tickerResolution.js';
 import type { HealthGuard } from './HealthGuard.js';
@@ -115,6 +115,52 @@ export interface CycleReport {
   errors: string[];
 }
 
+export interface MonitorReport {
+  startedAt: string;
+  finishedAt: string;
+  equityCents: number;
+  openPositions: number;
+  exitsTriggered: { ticker: string; reason: string }[];
+  fillsRecorded: number;
+  positionsOpened: number;
+  positionsClosed: number;
+  /** Non-null when a strategy-level limit is breached right now. */
+  strategyBreach: string | null;
+  runState: Strategy['runState'];
+  errors: string[];
+}
+
+function emptyCycleReport(correlationId: string, startedAt: string): CycleReport {
+  return {
+    correlationId,
+    startedAt,
+    finishedAt: startedAt,
+    mode: 'PAPER',
+    runState: 'RUNNING',
+    halted: false,
+    haltReason: null,
+    ingested: 0,
+    xRequests: 0,
+    postsReceived: 0,
+    filtered: { accepted: 0, downweighted: 0, rejected: 0 },
+    resolutions: 0,
+    candidates: 0,
+    candidatesWithoutNewEvidence: 0,
+    signalsGenerated: 0,
+    proposalsCreated: 0,
+    riskApproved: 0,
+    riskRejected: 0,
+    ordersSubmitted: 0,
+    awaitingApproval: 0,
+    fillsRecorded: 0,
+    positionsOpened: 0,
+    positionsClosed: 0,
+    exitsTriggered: [],
+    equityCents: 0,
+    errors: [],
+  };
+}
+
 export class StrategyRunner {
   private readonly d: StrategyRunnerDeps;
   private readonly log: Logger;
@@ -133,34 +179,7 @@ export class StrategyRunner {
   async runCycle(): Promise<CycleReport> {
     const correlationId = randomId('cycle');
     const startedAt = this.d.clock.nowIso();
-    const report: CycleReport = {
-      correlationId,
-      startedAt,
-      finishedAt: startedAt,
-      mode: 'PAPER',
-      runState: 'RUNNING',
-      halted: false,
-      haltReason: null,
-      ingested: 0,
-      xRequests: 0,
-      postsReceived: 0,
-      filtered: { accepted: 0, downweighted: 0, rejected: 0 },
-      resolutions: 0,
-      candidates: 0,
-      candidatesWithoutNewEvidence: 0,
-      signalsGenerated: 0,
-      proposalsCreated: 0,
-      riskApproved: 0,
-      riskRejected: 0,
-      ordersSubmitted: 0,
-      awaitingApproval: 0,
-      fillsRecorded: 0,
-      positionsOpened: 0,
-      positionsClosed: 0,
-      exitsTriggered: [],
-      equityCents: 0,
-      errors: [],
-    };
+    const report = emptyCycleReport(correlationId, startedAt);
 
     const strategy = this.strategy();
     report.mode = strategy.mode;
@@ -310,44 +329,8 @@ export class StrategyRunner {
       }
     }
 
-    /* ------------------------------------------ 5. mark to market ----- */
-    const quotes = await this.quotesForOpenExposure(strategy, report);
-    const marks = new Map([...quotes].map(([ticker, q]) => [ticker, q.price]));
-    const ledger = this.d.ledger.mark(marks);
-    report.equityCents = ledger.equityCents;
-
-    const benchmarkQuote = quotes.get(strategy.benchmarkTicker.toUpperCase()) ?? null;
-    this.d.ledger.snapshot(benchmarkQuote?.price ?? null);
-
-    /* ------------------------------------------------- 6. exits ------- */
-    const breach = this.d.riskEngine.strategyBreach(strategy.riskLimits);
-    const openPositions = this.d.store.positions.open(strategy.strategyId);
-    const exitDecisions = this.d.exitEngine.evaluateAll(openPositions, {
-      quotes,
-      strategyRiskShutdown: breach.breached,
-      strategyRiskDetail: breach.reasons.join('; '),
-      killSwitchLiquidate: this.d.health.shouldLiquidate,
-    });
-
-    for (const decision of exitDecisions) {
-      if (!decision.shouldExit || !decision.reason) continue;
-      const position = openPositions.find((p) => p.positionId === decision.positionId);
-      if (!position) continue;
-      try {
-        const outcome = await this.d.orderRouter.submitExit(position, decision.reason, decision.note);
-        if (outcome.ok) {
-          report.exitsTriggered.push({ ticker: position.ticker, reason: decision.reason });
-          this.d.health.recordSuccess('broker');
-        } else if (outcome.reason === 'BROKER_ERROR') {
-          report.errors.push(`exit ${position.ticker}: ${outcome.detail}`);
-          this.d.health.recordFailure('broker', outcome.detail);
-        }
-      } catch (e) {
-        const detail = e instanceof Error ? e.message : String(e);
-        report.errors.push(`exit ${position.ticker}: ${detail}`);
-        this.d.health.recordFailure('broker', detail, e instanceof BrokerError ? e.kind : undefined);
-      }
-    }
+    /* -------------------------------------- 5-6. mark and exit -------- */
+    const { quotes, marks, breach } = await this.markAndExit(strategy, report);
 
     /* --------------------------------- 7-9. propose, risk, execute ---- */
     if (breach.breached) {
@@ -369,28 +352,7 @@ export class StrategyRunner {
     }
 
     /* --------------------------------------------- 10. reconcile ------ */
-    try {
-      const reconcile = await this.d.positionManager.reconcile();
-      report.fillsRecorded = reconcile.fillsRecorded;
-      report.positionsOpened = reconcile.positionsOpened.length;
-      report.positionsClosed = reconcile.positionsClosed.length;
-      report.errors.push(...reconcile.errors);
-      // Only a reconciliation that actually contacted the broker is evidence
-      // of health. A cycle with no open orders proves nothing, and treating it
-      // as a success would silently reset the circuit breaker every cycle.
-      if (reconcile.errors.length > 0) {
-        this.d.health.recordFailure('broker', reconcile.errors[0] ?? 'order reconciliation failed');
-      } else if (reconcile.ordersChecked > 0) {
-        this.d.health.recordSuccess('broker');
-      }
-    } catch (e) {
-      const detail = e instanceof Error ? e.message : String(e);
-      report.errors.push(`reconcile: ${detail}`);
-      this.d.health.recordFailure('broker', detail, e instanceof BrokerError ? e.kind : undefined);
-    }
-
-    // Re-mark after fills so equity reflects the new positions.
-    this.d.ledger.mark(marks);
+    await this.reconcileFills(report, marks);
 
     /* --------------------------------------------- 11. analytics ------ */
     try {
@@ -422,6 +384,122 @@ export class StrategyRunner {
   }
 
   /* ------------------------------------------------------------ stages */
+
+  /**
+   * Mark open exposure to market and act on exit rules.
+   *
+   * Extracted from the cycle so the position-monitor loop can run it on its own
+   * cadence. A stop-loss must not wait for the next X scan: exits are about
+   * capital already at risk, and their timing has nothing to do with how often
+   * new posts appear.
+   */
+  private async markAndExit(
+    strategy: Strategy,
+    report: CycleReport,
+  ): Promise<{ quotes: Map<string, Quote>; marks: Map<string, number>; breach: ReturnType<RiskEngine['strategyBreach']> }> {
+    const quotes = await this.quotesForOpenExposure(strategy, report);
+    const marks = new Map([...quotes].map(([ticker, q]) => [ticker, q.price]));
+    const ledger = this.d.ledger.mark(marks);
+    report.equityCents = ledger.equityCents;
+
+    const benchmarkQuote = quotes.get(strategy.benchmarkTicker.toUpperCase()) ?? null;
+    this.d.ledger.snapshot(benchmarkQuote?.price ?? null);
+
+    const breach = this.d.riskEngine.strategyBreach(strategy.riskLimits);
+    const openPositions = this.d.store.positions.open(strategy.strategyId);
+    const exitDecisions = this.d.exitEngine.evaluateAll(openPositions, {
+      quotes,
+      strategyRiskShutdown: breach.breached,
+      strategyRiskDetail: breach.reasons.join('; '),
+      killSwitchLiquidate: this.d.health.shouldLiquidate,
+    });
+
+    for (const decision of exitDecisions) {
+      if (!decision.shouldExit || !decision.reason) continue;
+      const position = openPositions.find((p) => p.positionId === decision.positionId);
+      if (!position) continue;
+      try {
+        const outcome = await this.d.orderRouter.submitExit(position, decision.reason, decision.note);
+        if (outcome.ok) {
+          report.exitsTriggered.push({ ticker: position.ticker, reason: decision.reason });
+          this.d.health.recordSuccess('broker');
+        } else if (outcome.reason === 'BROKER_ERROR') {
+          report.errors.push(`exit ${position.ticker}: ${outcome.detail}`);
+          this.d.health.recordFailure('broker', outcome.detail);
+        }
+      } catch (e) {
+        const detail = e instanceof Error ? e.message : String(e);
+        report.errors.push(`exit ${position.ticker}: ${detail}`);
+        this.d.health.recordFailure('broker', detail, e instanceof BrokerError ? e.kind : undefined);
+      }
+    }
+
+    return { quotes, marks, breach };
+  }
+
+  /** Turn broker order state into fills, positions and ledger movements. */
+  private async reconcileFills(report: CycleReport, marks: Map<string, number>): Promise<void> {
+    try {
+      const reconcile = await this.d.positionManager.reconcile();
+      report.fillsRecorded = reconcile.fillsRecorded;
+      report.positionsOpened = reconcile.positionsOpened.length;
+      report.positionsClosed = reconcile.positionsClosed.length;
+      report.errors.push(...reconcile.errors);
+      // Only a reconciliation that actually contacted the broker is evidence
+      // of health. A cycle with no open orders proves nothing, and treating it
+      // as a success would silently reset the circuit breaker every cycle.
+      if (reconcile.errors.length > 0) {
+        this.d.health.recordFailure('broker', reconcile.errors[0] ?? 'order reconciliation failed');
+      } else if (reconcile.ordersChecked > 0) {
+        this.d.health.recordSuccess('broker');
+      }
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
+      report.errors.push(`reconcile: ${detail}`);
+      this.d.health.recordFailure('broker', detail, e instanceof BrokerError ? e.kind : undefined);
+    }
+
+    // Re-mark after fills so equity reflects the new positions.
+    this.d.ledger.mark(marks);
+  }
+
+  /**
+   * Position monitoring WITHOUT touching X.
+   *
+   * This is the loop that runs every 60 seconds: re-mark, evaluate exits,
+   * reconcile fills. It costs Tiingo and Alpaca requests but never an X
+   * request, which is what lets position safety run at a different, faster
+   * cadence than the X scan without burning the X budget.
+   *
+   * It can never open a position. No ingestion, no signal generation, no
+   * proposal building happens here.
+   */
+  async monitorPositions(): Promise<MonitorReport> {
+    const startedAt = this.d.clock.nowIso();
+    const strategy = this.strategy();
+    const report = emptyCycleReport(randomId('monitor'), startedAt);
+    report.mode = strategy.mode;
+    report.runState = strategy.runState;
+
+    const { marks, breach } = await this.markAndExit(strategy, report);
+    await this.reconcileFills(report, marks);
+
+    const finalStrategy = this.strategy();
+    return {
+      startedAt,
+      finishedAt: this.d.clock.nowIso(),
+      equityCents: this.d.ledger.get().equityCents,
+      openPositions: this.d.store.positions.open(strategy.strategyId).length,
+      exitsTriggered: report.exitsTriggered,
+      fillsRecorded: report.fillsRecorded,
+      positionsOpened: report.positionsOpened,
+      positionsClosed: report.positionsClosed,
+      strategyBreach: breach.breached ? breach.reasons.join('; ') : null,
+      runState: finalStrategy.runState,
+      errors: report.errors,
+    };
+  }
+
 
   private async proposeAndExecute(
     strategy: Strategy,

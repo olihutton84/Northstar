@@ -28,7 +28,10 @@
     "reconcile": "npm run lab -- reconcile",
     "replay": "npm run lab -- replay",
     "compare": "npm run lab -- compare",
-    "audit": "npm run lab -- audit"
+    "audit": "npm run lab -- audit",
+    "funnel": "npm run lab -- funnel",
+    "eod": "npm run lab -- eod",
+    "api": "npm run lab -- api"
   },
   "devDependencies": {
     "typescript": "^5.6.0",

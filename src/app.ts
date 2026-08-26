@@ -54,10 +54,13 @@ import { SourceRegistry } from './providers/social/sourceRegistry.js';
 import { XProvider } from './providers/social/XProvider.js';
 import { ApiMeter } from './runtime/ApiMeter.js';
 import { ApprovalService } from './runtime/ApprovalService.js';
+import { DailyReportService } from './runtime/DailyReport.js';
+import { FunnelService } from './runtime/Funnel.js';
 import { HealthGuard } from './runtime/HealthGuard.js';
 import { PollingPolicy } from './runtime/PollingPolicy.js';
 import { ReadinessService } from './runtime/Readiness.js';
 import { ReconciliationService } from './runtime/Reconciliation.js';
+import { Scheduler } from './runtime/Scheduler.js';
 import { SignalAuditService } from './runtime/SignalAudit.js';
 import { StrategyRunner } from './runtime/StrategyRunner.js';
 import { UniverseRegistry } from './universe/UniverseRegistry.js';
@@ -118,6 +121,9 @@ export class NorthstarApp {
   readonly audit: SignalAuditService;
   readonly reconciliation: ReconciliationService;
   readonly readiness: ReadinessService;
+  readonly scheduler: Scheduler;
+  readonly funnel: FunnelService;
+  readonly dailyReport: DailyReportService;
 
   constructor(opts: NorthstarAppOptions = {}) {
     this.env = opts.env ?? loadEnv();
@@ -257,6 +263,18 @@ export class NorthstarApp {
       this.spec.strategyId,
     );
 
+    this.funnel = new FunnelService(this.store, this.clock, this.spec.strategyId, this.apiMeter);
+
+    this.dailyReport = new DailyReportService({
+      store: this.store,
+      ledger: this.ledger,
+      funnel: this.funnel,
+      meter: this.apiMeter,
+      health: this.health,
+      clock: this.clock,
+      strategyId: this.spec.strategyId,
+    });
+
     this.readiness = new ReadinessService(this, this.clock, this.logger);
 
     this.runner = new StrategyRunner({
@@ -284,6 +302,16 @@ export class NorthstarApp {
       strategyId: this.spec.strategyId,
       ops: this.ops,
       onSignal: (signal) => this.polling.watch(signal.ticker, signal.score),
+    });
+
+    this.scheduler = new Scheduler({
+      runner: this.runner,
+      reconciliation: this.reconciliation,
+      polling: this.polling,
+      meter: this.apiMeter,
+      ops: this.ops,
+      clock: this.clock,
+      logger: this.logger,
     });
   }
 

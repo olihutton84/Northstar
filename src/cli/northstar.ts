@@ -9,6 +9,9 @@
  *   northstar serve              start the Trading Lab dashboard
  *   northstar status             print strategy status and the ledger
  *   northstar report [horizon]   print the paper-qualification report
+ *   northstar funnel             print today's stage-by-stage funnel
+ *   northstar eod [YYYY-MM-DD]   print the end-of-day report
+ *   northstar api                print API usage and polling state
  *   northstar signals [n]        print recent signals with explanations
  *   northstar trace <id>         reconstruct one decision chain end to end
  *   northstar kill <reason>      engage the kill switch
@@ -17,6 +20,7 @@
  */
 import { ConsoleLogger, formatSignedUsd, formatUsd, SystemClock } from '../core/index.js';
 import { loadEnv } from '../config/env.js';
+import { estimateDailyXRequests, type OperationsConfig } from '../config/operations.js';
 import { ConfigurationError, NorthstarApp } from '../app.js';
 import { ApiServer } from '../api/server.js';
 import type { ForwardHorizon, TradingMode } from '../domain/types.js';
@@ -54,11 +58,18 @@ function heading(title: string): void {
   out('─'.repeat(Math.min(78, title.length + 12)));
 }
 
-function makeApp(mode?: TradingMode): NorthstarApp {
-  return new NorthstarApp({ env, clock, logger, ...(mode ? { mode } : {}) });
+function makeApp(mode?: TradingMode, operations?: Partial<OperationsConfig>): NorthstarApp {
+  return new NorthstarApp({
+    env,
+    clock,
+    logger,
+    ...(mode ? { mode } : {}),
+    ...(operations ? { operations } : {}),
+  });
 }
 
 const GREEN = '\x1b[32m';
+const BOLD = '\x1b[1m';
 const RED = '\x1b[31m';
 const YELLOW = '\x1b[33m';
 const DIM = '\x1b[2m';
@@ -133,38 +144,42 @@ async function main(): Promise<void> {
     }
 
     case 'paper': {
-      const intervalMinutes = Number(flag(args, '--interval') ?? 15);
-      const maxCycles = Number(flag(args, '--cycles') ?? Infinity);
-      const app = makeApp('PAPER');
+      // --interval is the X SCAN cadence in SECONDS and nothing else.
+      // Position monitoring and reconciliation run on their own cadences from
+      // the operations config: hiding three unrelated jobs behind one interval
+      // is how a bot ends up either burning its X quota or checking a
+      // stop-loss every fifteen minutes.
+      const intervalFlag = flag(args, '--interval');
+      const maxScans = Number(flag(args, '--cycles') ?? Infinity);
+      const app = makeApp('PAPER', intervalFlag === undefined ? {} : { xScanIntervalSeconds: Number(intervalFlag) });
       app.seed();
       app.setMode('PAPER');
       printProviderBanner(app);
-      out(`Paper loop started: one cycle every ${intervalMinutes} minute(s). Ctrl-C to stop.`);
 
-      let cycles = 0;
+      const ops = app.ops;
+      const estimate = estimateDailyXRequests(ops, { queriesPerScan: 1, hoursActive: 6.5 });
+      out();
+      out(`${BOLD}Cadences${RESET}`);
+      out(`  X scan             every ${ops.xScanIntervalSeconds}s  (${ops.xEventWatchIntervalSeconds}s on event watch, ${ops.xApiPressureIntervalSeconds}s under API pressure)`);
+      out(`  Position monitor   every ${ops.positionMonitorIntervalSeconds}s  (marks, exits, fills — no X requests)`);
+      out(`  Reconciliation     every ${ops.reconciliationIntervalSeconds}s  (plus immediately after any order event)`);
+      out(`  ${DIM}Estimated X requests for a full trading day: ~${estimate.requests}${RESET}`);
+      out();
+      out('Paper loop started. Ctrl-C to stop.');
+
       let stopping = false;
       process.on('SIGINT', () => {
+        if (stopping) process.exit(130);
         stopping = true;
-        out('\nStopping after the current cycle…');
+        out('\nStopping after the current task…');
+        app.scheduler.stop();
       });
 
-      while (!stopping && cycles < maxCycles) {
-        cycles += 1;
-        try {
-          const report = await app.runner.runCycle();
-          out(
-            `[${report.finishedAt}] cycle ${cycles}: ${report.signalsGenerated} signals, ` +
-            `${report.proposalsCreated} proposals, ${report.riskRejected} risk-rejected, ` +
-            `${report.ordersSubmitted} orders, ${report.exitsTriggered.length} exits, ` +
-            `equity ${formatUsd(report.equityCents)}` +
-            (report.halted ? ` — HALTED: ${report.haltReason}` : ''),
-          );
-        } catch (e) {
-          logger.error('cycle failed', { detail: e instanceof Error ? e.message : String(e) });
-        }
-        if (stopping || cycles >= maxCycles) break;
-        await sleep(intervalMinutes * 60_000);
-      }
+      app.scheduler.startSupportLoops();
+      await app.scheduler.start();
+
+      out();
+      out(app.dailyReport.render(app.dailyReport.build()));
       app.close();
       break;
     }
@@ -372,7 +387,59 @@ async function main(): Promise<void> {
       if (!report.liveDataConfigured) {
         out_(`${YELLOW}Note: not all providers are live, so the reachability checks that matter most were skipped.${RESET}`);
       }
-      process.exitCode = report.overall === 'PASS' ? 0 : 1;
+
+      out_();
+      const verdict = report.readyForRealDataPaper ? `${GREEN}YES${RESET}` : `${RED}NO${RESET}`;
+      out_(`READY FOR REAL-DATA PAPER: ${verdict}`);
+      out_(`${DIM}${report.readyForRealDataPaperReason}${RESET}`);
+
+      // Exit code follows the real-data verdict, so CI or a shell guard can
+      // gate a start on it rather than on the softer overall PASS.
+      process.exitCode = report.readyForRealDataPaper ? 0 : 1;
+      app.close();
+      break;
+    }
+
+    case 'funnel': {
+      const app = makeApp();
+      heading('DAY FUNNEL');
+      out_(app.funnel.render(app.funnel.report()));
+      out_();
+      out_(`${DIM}A funnel that narrows to zero is a normal outcome. Nothing here is a target.${RESET}`);
+      app.close();
+      break;
+    }
+
+    case 'eod': {
+      const day = args[0];
+      const app = makeApp();
+      out_(app.dailyReport.render(app.dailyReport.build(day)));
+      app.close();
+      break;
+    }
+
+    case 'api': {
+      const app = makeApp();
+      heading('API USAGE TODAY');
+      for (const usage of app.apiMeter.today()) {
+        out_(`${BOLD}${usage.provider.toUpperCase()}${RESET}`);
+        out_(`  requests ${usage.requests}  ok ${usage.successes}  rate-limited ${usage.rateLimited}  ` +
+          `auth ${usage.unauthorized + usage.forbidden}  timeouts ${usage.timeouts}  ` +
+          `server ${usage.serverErrors}  other ${usage.otherErrors}`);
+        out_(`  last success ${usage.lastSuccessAt ?? 'never'}` +
+          (usage.minutesSinceSuccess === null ? '' : ` (${usage.minutesSinceSuccess}m ago)`));
+        if (usage.lastErrorAt) out_(`  last error   ${usage.lastErrorAt} ${usage.lastErrorKind}: ${usage.lastErrorDetail ?? ''}`);
+        if (usage.rateLimitRemaining !== null) {
+          out_(`  headroom     ${usage.rateLimitRemaining}/${usage.rateLimitLimit ?? '?'} until ${usage.rateLimitResetAt ?? '?'}`);
+        }
+        if (usage.softCapUsedPct !== null) out_(`  daily budget ${usage.softCapUsedPct}% of the soft cap`);
+        const pressure = app.apiMeter.underPressure(usage.provider as 'x');
+        out_(`  pressure     ${pressure.pressured ? `${YELLOW}YES${RESET}` : 'no'} — ${pressure.reason}`);
+        out_();
+      }
+      out_(`${BOLD}Polling${RESET}`);
+      const polling = app.polling.status();
+      out_(`  state ${polling.state} · next scan in ${polling.intervalSeconds}s · ${polling.reason}`);
       app.close();
       break;
     }
@@ -676,7 +743,10 @@ function printHelp(): void {
   migrate                  create or upgrade the database
   seed                     create the strategy, universe and $50 capital ledger
   cycle [--mode PAPER]     run one full pipeline cycle
-  paper [--interval 15]    run the paper loop continuously (--cycles N to bound it)
+  paper [--interval 120]   run the paper loop; --interval is the X SCAN cadence
+                           in SECONDS. Position monitoring (60s) and
+                           reconciliation (180s) run on their own cadences.
+                           --cycles N bounds the number of X scans.
   serve [--mode PAPER]     start the Trading Lab dashboard
   status                   strategy status and capital ledger
   simulate [--cycles 60]   offline paper simulation over the real pipeline
@@ -686,6 +756,9 @@ function printHelp(): void {
   compare <file> --versions a,b   run two strategy versions over one dataset
   reconcile                compare the ledger with the broker (read-only)
   readiness                PASS/FAIL gates before the first real-credential run
+  funnel                   today's stage-by-stage funnel, X request to trade
+  eod [YYYY-MM-DD]         end-of-day report
+  api                      API usage, rate-limit headroom and polling state
   audit [signalId]         full evidential trail behind one signal
   report [1h|1d|1w|1m]     paper-qualification report
   signals [n]              recent signals with full explanations
