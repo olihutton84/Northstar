@@ -79,6 +79,14 @@ export interface HarnessOptions {
   seed?: boolean;
   /** Substitute a failure-injecting broker for the simulated one. */
   broker?: BrokerProvider;
+  /**
+   * Back the database with a file instead of memory.
+   *
+   * Required to simulate a restart: an in-memory database dies with the
+   * process it belongs to, so a crash-and-reload test needs somewhere the
+   * state can genuinely survive.
+   */
+  databasePath?: string;
   /** Override operational cadences and rate gates. */
   operations?: Partial<OperationsConfig>;
 }
@@ -110,7 +118,7 @@ export function createHarness(opts: HarnessOptions = {}): Harness {
     social,
     marketData,
     broker,
-    databasePath: ':memory:',
+    databasePath: opts.databasePath ?? ':memory:',
     ...(opts.operations ? { operations: opts.operations } : {}),
   });
 
