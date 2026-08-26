@@ -15,6 +15,7 @@
  *   northstar api                print API usage and polling state
  *   northstar signals [n]        print recent signals with explanations
  *   northstar trace <id>         reconstruct one decision chain end to end
+ *   northstar pause <reason>     stop new entries; exits keep running
  *   northstar kill <reason>      engage the kill switch
  *   northstar resume <note>      clear a pause/kill
  *   northstar mode PAPER|LIVE    set the trading mode
@@ -26,6 +27,7 @@ import { ConfigurationError, NorthstarApp } from '../app.js';
 import { ApiServer } from '../api/server.js';
 import { startBotProcess } from '../runtime/BotProcess.js';
 import { assessStorage, databaseDirectoryUsable, type StorageVerdict } from '../runtime/StorageCheck.js';
+import { maxPositionCentsFor } from '../config/executionEpochs.js';
 import type { ForwardHorizon, TradingMode } from '../domain/types.js';
 import { openDatabase } from '../persistence/db.js';
 import { runSimulation, summarise } from './simulation.js';
@@ -90,6 +92,46 @@ function storageTag(verdict: StorageVerdict): string {
     case 'LIKELY_EPHEMERAL':
       return `${RED}LIKELY EPHEMERAL${RESET}`;
   }
+}
+
+/**
+ * State the capital behind the run, and whether it may act on its own.
+ *
+ * Both are printed before the first scan because both are things an operator
+ * would otherwise assume: that the allocation is what they last configured, and
+ * that a running bot is a trading bot. A bot that is up, healthy and silently
+ * unable to execute looks identical to one that simply found nothing to trade.
+ */
+function printCapitalAndAutonomy(app: NorthstarApp): void {
+  const limits = app.spec.riskLimits;
+  const maxPosition = maxPositionCentsFor(app.epoch.capitalCents, limits.maxPositionPctOfEquity);
+  const ledger = app.ledger.get();
+
+  out(`${BOLD}Capital${RESET}`);
+  out(`  Epoch              ${app.epoch.epochId}  ${DIM}${app.epoch.label}${RESET}`);
+  out(`  Allocation         ${formatUsd(app.epoch.capitalCents)}  ` +
+      `${DIM}strategy version declares ${formatUsd(app.spec.allocatedCapitalCents)}; capital is an execution setting${RESET}`);
+  out(`  Max position       ${formatUsd(maxPosition)}  ${DIM}${limits.maxPositionPctOfEquity}% of equity${RESET}`);
+  out(`  Max holdings       ${limits.maxConcurrentPositions}`);
+  out(`  Cash / reserved    ${formatUsd(ledger.cashCents)} / ${formatUsd(ledger.reservedCents)}`);
+  out(`  Equity             ${formatUsd(ledger.equityCents)}`);
+  out();
+
+  const verdict = app.autonomy.evaluate();
+  out(`${BOLD}Execution${RESET}`);
+  out(`  Tier               ${verdict.tier}`);
+  if (verdict.autonomous) {
+    out(`  Autonomous         ${GREEN}ENABLED${RESET}  ${DIM}qualifying proposals route without human approval${RESET}`);
+  } else {
+    out(`  Autonomous         ${RED}BLOCKED${RESET}`);
+    for (const check of verdict.checks.filter((c) => !c.passed)) {
+      out(`${YELLOW}    - ${check.detail}${RESET}`);
+    }
+    if (verdict.requiresHumanApproval) {
+      out(`${DIM}    LIVE always requires a human. This is not a fault.${RESET}`);
+    }
+  }
+  out();
 }
 
 /**
@@ -269,6 +311,7 @@ async function main(): Promise<void> {
       out(`  Position monitor   every ${app.ops.positionMonitorIntervalSeconds}s`);
       out(`  Reconciliation     every ${app.ops.reconciliationIntervalSeconds}s`);
       out();
+      printCapitalAndAutonomy(app);
 
       const maxScans = flag(args, '--cycles');
       const handle = await startBotProcess({
@@ -685,6 +728,26 @@ async function main(): Promise<void> {
       break;
     }
 
+    /*
+     * PAUSE NEW ENTRIES — deliberately not a stop.
+     *
+     * Exits, fills and reconciliation keep running. A position nobody is
+     * watching is worse than one still being managed, so pausing closes the
+     * front door and nothing else. `kill` is the emergency control.
+     */
+    case 'pause': {
+      const reason = args.filter((a) => !a.startsWith('--')).join(' ') || 'Manual pause from CLI';
+      const app = makeApp();
+      app.seed();
+      const strategy = app.health.pauseByOperator(reason);
+      out(`New entries PAUSED: ${reason}`);
+      out(`Run state: ${strategy.runState}`);
+      out('Exits, stop-losses, fills and reconciliation continue. Open positions are still managed.');
+      out('Use `northstar resume <note>` to allow new entries again.');
+      app.close();
+      break;
+    }
+
     case 'resume': {
       const app = makeApp();
       app.seed();
@@ -875,6 +938,10 @@ function printHelp(): void {
   run                      the deployable process: trading loops + console
                            (this is what "npm start" runs)
   serve [--mode PAPER]     start the X Bot Console only
+  pause <reason>           PAUSE NEW ENTRIES; exits and reconciliation continue
+  resume <note>            allow new entries again
+  kill <reason>            EMERGENCY STOP; cancels open orders, keeps positions
+  kill <reason> --liquidate  EMERGENCY LIQUIDATE; also closes positions
   status                   strategy status and capital ledger
   simulate [--cycles 60]   offline paper simulation over the real pipeline
   replay sample            write a deterministic sample replay dataset

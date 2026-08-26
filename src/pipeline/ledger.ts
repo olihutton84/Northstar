@@ -35,17 +35,34 @@ export class CapitalLedgerService {
     private readonly clock: Clock,
     logger: Logger,
     private readonly strategyId: string,
+    /**
+     * The execution epoch this service reads and writes.
+     *
+     * Capital belongs to an epoch, not to the frozen strategy version, so every
+     * ledger operation is scoped to one. A previous epoch's ledger is reachable
+     * for reporting but is never written by a later run.
+     */
+    private readonly epochId: string,
   ) {
     this.log = logger.child('ledger');
   }
 
+  /** The execution epoch every operation here is scoped to. */
+  get epoch(): string {
+    return this.epochId;
+  }
+
   init(startingCapitalCents: Cents): CapitalLedger {
-    return this.store.ledger.init(this.strategyId, startingCapitalCents, this.clock.nowIso());
+    return this.store.ledger.init(this.strategyId, this.epochId, startingCapitalCents, this.clock.nowIso());
   }
 
   get(): CapitalLedger {
-    const ledger = this.store.ledger.get(this.strategyId);
-    if (!ledger) throw new Error(`No capital ledger for strategy ${this.strategyId}. Run seed/init first.`);
+    const ledger = this.store.ledger.get(this.strategyId, this.epochId);
+    if (!ledger) {
+      throw new Error(
+        `No capital ledger for strategy ${this.strategyId} in epoch ${this.epochId}. Run seed/init first.`,
+      );
+    }
     return ledger;
   }
 
@@ -87,7 +104,7 @@ export class CapitalLedgerService {
    */
   reservedFor(reference: string): Cents {
     let total = 0;
-    for (const e of this.store.ledger.entries(this.strategyId, 100_000)) {
+    for (const e of this.store.ledger.entries(this.strategyId, this.epochId, 100_000)) {
       if (e.reference !== reference) continue;
       if (e.kind === 'RESERVE') total += e.amountCents;
       else if (e.kind === 'RELEASE_RESERVE') total -= Math.abs(e.amountCents);
@@ -249,7 +266,7 @@ export class CapitalLedgerService {
    */
   verifyIntegrity(): LedgerIntegrityReport {
     const ledger = this.get();
-    const entries = this.store.ledger.entries(this.strategyId, 100_000);
+    const entries = this.store.ledger.entries(this.strategyId, this.epochId, 100_000);
 
     let expected = 0;
     for (const e of entries) {
@@ -272,14 +289,16 @@ export class CapitalLedgerService {
   }
 
   entries(limit = 100): LedgerEntry[] {
-    return this.store.ledger.entries(this.strategyId, limit);
+    return this.store.ledger.entries(this.strategyId, this.epochId, limit);
   }
 
   private append(kind: LedgerEntry['kind'], amountCents: Cents, cashAfter: Cents, reference: string, note: string): void {
     const at = this.clock.nowIso();
     this.store.ledger.appendEntry({
-      entryId: deterministicId('led', this.strategyId, kind, reference, at, String(amountCents), String(this.seq += 1)),
+      entryId: deterministicId(
+        'led', this.strategyId, this.epochId, kind, reference, at, String(amountCents), String(this.seq += 1)),
       strategyId: this.strategyId,
+      epochId: this.epochId,
       at,
       kind,
       amountCents,

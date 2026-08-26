@@ -19,6 +19,7 @@ import { join } from 'node:path';
 import { FixedClock, NullLogger, dollarsToCents, formatUsd } from '../../src/core/index.js';
 import { NorthstarApp } from '../../src/app.js';
 import { X_SIGNAL_V1, X_SIGNAL_V1_FINGERPRINT } from '../../src/config/strategyRegistry.js';
+import { ACTIVE_EPOCH, maxPositionCentsFor } from '../../src/config/executionEpochs.js';
 import { SIGNAL_CONFIG_V1 } from '../../src/config/signalConfig.js';
 import { DEFAULT_OPERATIONS } from '../../src/config/operations.js';
 import { TiingoMarketDataProvider } from '../../src/providers/marketdata/TiingoMarketDataProvider.js';
@@ -41,10 +42,10 @@ import { BrokerError } from '../../src/providers/broker/BrokerProvider.js';
 
 const NOW = '2026-03-10T15:00:00.000Z';
 
-/* ------------------------------------------------- 6. the $50 allocation */
+/* --------------------------------------------- 6. the allocation ceiling */
 
-describe('the $50 allocation is a hard ceiling', () => {
-  it('is exactly the numbers the mandate specifies', () => {
+describe('the allocation is a hard ceiling', () => {
+  it('keeps the version frozen at the numbers it published', () => {
     const l = X_SIGNAL_V1.riskLimits;
     assert.equal(l.startingCapitalCents, dollarsToCents(50), 'allocation is $50');
     assert.equal(l.maxPositionPctOfEquity, 20, '20% of equity');
@@ -58,6 +59,23 @@ describe('the $50 allocation is a hard ceiling', () => {
       dollarsToCents(10) * 5,
       l.startingCapitalCents,
       '5 positions at the cap is the whole allocation, and no more',
+    );
+  });
+
+  it('deploys the EPOCH allocation, and derives the cap from it', () => {
+    // Capital moved to the execution epoch; the proportional rules did not
+    // move and are applied to whatever the epoch allocates.
+    const l = X_SIGNAL_V1.riskLimits;
+    assert.equal(ACTIVE_EPOCH.capitalCents, dollarsToCents(1000), 'the epoch deploys $1,000');
+    assert.equal(
+      maxPositionCentsFor(ACTIVE_EPOCH.capitalCents, l.maxPositionPctOfEquity),
+      dollarsToCents(200),
+      '20% of $1,000 is $200',
+    );
+    assert.equal(
+      maxPositionCentsFor(ACTIVE_EPOCH.capitalCents, l.maxPositionPctOfEquity) * l.maxConcurrentPositions,
+      ACTIVE_EPOCH.capitalCents,
+      '5 positions at the cap is the whole epoch allocation, and no more',
     );
   });
 
@@ -129,8 +147,8 @@ describe('the $50 allocation is a hard ceiling', () => {
 
     assert.ok(account.equity * 100 > ledger.equityCents * 10, 'the account is much larger than the strategy');
     assert.ok(
-      ledger.equityCents <= X_SIGNAL_V1.riskLimits.startingCapitalCents * 1.5,
-      'the strategy ledger tracks its own $50, not the account',
+      ledger.equityCents <= ACTIVE_EPOCH.capitalCents * 1.5,
+      'the strategy ledger tracks its own epoch allocation, not the account',
     );
     h.close();
   });

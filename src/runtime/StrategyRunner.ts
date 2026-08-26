@@ -52,6 +52,7 @@ import type { RiskEngine } from '../pipeline/risk.js';
 import { XSignalEngine } from '../pipeline/signal/SignalEngine.js';
 import { TickerResolver } from '../pipeline/tickerResolution.js';
 import type { HealthGuard } from './HealthGuard.js';
+import type { AutonomyGate } from './AutonomyGate.js';
 
 export interface StrategyRunnerDeps {
   store: Store;
@@ -76,6 +77,15 @@ export interface StrategyRunnerDeps {
   signalConfig: SignalEngineConfig;
   exitRules: ExitRuleConfig;
   strategyId: string;
+  /**
+   * Decides whether an order may be placed with no human in the loop.
+   *
+   * Consulted immediately before every automatic submission — not once at
+   * startup — so a provider that degrades, a kill switch thrown mid-session or
+   * a readiness verdict that expires all stop autonomous execution at the next
+   * proposal rather than at the next restart.
+   */
+  autonomy: AutonomyGate;
   /** Operational rate controls. Absent leaves the rate gates unenforced. */
   ops?: OperationsConfig;
   /** Put a security on event watch when a strong new signal lands. */
@@ -648,8 +658,19 @@ export class StrategyRunner {
         this.d.store.proposals.save(finalProposal);
       }
 
-      /* ------------------------------------------------- PAPER vs LIVE */
-      if (strategy.mode === 'PAPER') {
+      /* --------------------------------------------- autonomous or not */
+      /*
+       * The gate decides, not the mode field.
+       *
+       * `strategy.mode === 'PAPER'` says which account the order would go to.
+       * It says nothing about whether the DATA behind the order is real, and
+       * Alpaca PAPER is a real account with a real audit trail — fixture-driven
+       * orders written into it would be a fictional track record. The gate
+       * checks the whole configuration and is re-read per proposal.
+       */
+      const verdict = this.d.autonomy.evaluate();
+
+      if (verdict.autonomous) {
         this.recordDisposition(signal, 'PROPOSED', correlationId,
           `Proposal ${finalProposal.proposalId} cleared risk and was submitted automatically in PAPER mode.`,
           finalProposal.proposalId);
@@ -665,20 +686,37 @@ export class StrategyRunner {
           this.log.info('entry not submitted', { ticker: finalProposal.ticker, reason: outcome.reason, detail: outcome.detail });
         }
       } else {
-        // LIVE: stop here. The order is submitted only after a human approves
-        // via the approval API, which re-runs the router's gate.
+        /*
+         * Held. Either a human must approve it (LIVE, always), or the
+         * configuration is not cleared to act on its own.
+         *
+         * Either way the proposal is kept, not discarded: it remains visible on
+         * the console with the exact reason it did not execute, so an operator
+         * sees what the bot WOULD have done and why it did not.
+         */
         this.d.store.proposals.setStatus(finalProposal.proposalId, 'AWAITING_APPROVAL');
         report.awaitingApproval += 1;
+        const why = verdict.requiresHumanApproval
+          ? 'LIVE mode never submits on its own; a human must approve these exact terms.'
+          : `Autonomous execution is BLOCKED: ${verdict.blockReason ?? 'gate not satisfied'}`;
         this.recordDisposition(signal, 'AWAITING_LIVE_APPROVAL', correlationId,
-          'Proposal cleared risk and is held for explicit human approval; LIVE mode never submits on its own.',
-          finalProposal.proposalId);
+          `Proposal cleared risk and is held. ${why}`, finalProposal.proposalId);
         this.d.store.log.append({
           correlationId,
           strategyId: strategy.strategyId,
           stage: 'APPROVAL',
           subjectId: finalProposal.proposalId,
-          summary: `Awaiting human approval for LIVE ${finalProposal.ticker} order`,
-          payload: { proposalId: finalProposal.proposalId, expiresAt: finalProposal.expiresAt },
+          summary: verdict.requiresHumanApproval
+            ? `Awaiting human approval for LIVE ${finalProposal.ticker} order`
+            : `${finalProposal.ticker} order withheld: autonomous execution blocked`,
+          payload: {
+            proposalId: finalProposal.proposalId,
+            expiresAt: finalProposal.expiresAt,
+            tier: verdict.tier,
+            requiresHumanApproval: verdict.requiresHumanApproval,
+            blockReason: verdict.blockReason,
+            failedGates: verdict.checks.filter((c) => !c.passed).map((c) => c.id),
+          },
         });
       }
     }

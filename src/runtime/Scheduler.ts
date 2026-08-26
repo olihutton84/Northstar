@@ -57,6 +57,15 @@ export interface SchedulerOptions {
   onEvent?: (event: SchedulerEvent) => void;
   /** Stop after this many X scans. Used by tests and `--cycles`. */
   maxScans?: number;
+  /**
+   * Refresh the readiness verdict the autonomy gate depends on.
+   *
+   * Readiness makes network calls, so it is not run per proposal. It is run at
+   * start and then on the reconciliation cadence, and the gate treats a stale
+   * or missing verdict as a block. That way a vendor that fails mid-session
+   * withdraws autonomous execution on its own rather than needing a restart.
+   */
+  refreshReadiness?: () => Promise<void>;
 }
 
 interface StartOptions {
@@ -262,6 +271,9 @@ export class Scheduler {
   private async reconcileOnce(trigger: string): Promise<void> {
     this.reconciliations += 1;
     try {
+      // Kept fresh alongside reconciliation: both answer "is the outside world
+      // still what we think it is", on the same cadence.
+      await this.o.refreshReadiness?.();
       const result = await this.o.reconciliation.reconcile();
       this.lastReconcileAt = this.o.clock.nowIso();
       const drift = result.discrepancies.length;
@@ -296,6 +308,29 @@ export class Scheduler {
     // Before the first scan: what configuration produced everything that
     // follows, written where it survives the process.
     this.o.onStart?.();
+
+    /*
+     * Reconcile BEFORE the first scan, not on the reconciliation cadence.
+     *
+     * The X scan loop runs immediately while the reconcile loop waits out its
+     * interval first, so without this a restart could ingest, signal, propose
+     * and submit an order minutes before the bot ever checked its books against
+     * the broker. After a crash those books are exactly what cannot be trusted:
+     * an order may have been submitted and not recorded, a position closed
+     * remotely, a fill missed. Trading on unreconciled state is the restart
+     * hazard reconciliation exists to prevent.
+     */
+    await this.run(() => this.reconcileOnce('startup'));
+
+    // And before the first order: whether it is safe to point at real vendors.
+    // A run that never refreshes this cannot execute autonomously at all.
+    try {
+      await this.o.refreshReadiness?.();
+    } catch (e) {
+      this.log.warn('initial readiness refresh failed; autonomous execution stays blocked', {
+        detail: e instanceof Error ? e.message : String(e),
+      });
+    }
 
     this.log.info('scheduler started', {
       xScanSeconds: this.o.ops.xScanIntervalSeconds,

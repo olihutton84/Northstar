@@ -5,6 +5,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { dollarsToCents, formatUsd, quantityForCents } from '../../src/core/index.js';
 import { X_SIGNAL_V1 } from '../../src/config/strategyRegistry.js';
+import { ACTIVE_EPOCH, EPOCH_PAPER_50 } from '../../src/config/executionEpochs.js';
 import type { Position, Quote, RiskCheckId } from '../../src/domain/types.js';
 import { ExitEngine } from '../../src/pipeline/execution/ExitEngine.js';
 import { bullishTier1Post, corroboratingTier2Post, createHarness, TEST_NOW } from '../fixtures/harness.js';
@@ -212,26 +213,48 @@ describe('risk engine', () => {
 /* ------------------------------------------------------- capital accounting */
 
 describe('capital ledger', () => {
-  it('starts at exactly the $50 allocation', () => {
+  it('starts at exactly the active epoch allocation, not the strategy version', () => {
+    // Capital comes from the EXECUTION EPOCH. x-signal-v1 still declares $50 —
+    // that number is inside its frozen fingerprint and is the record of what the
+    // published version said — while what the bot actually deploys is the
+    // epoch's. The two are deliberately allowed to differ.
     const h = createHarness();
     const ledger = h.app.ledger.get();
-    assert.equal(ledger.startingCapitalCents, 5000);
-    assert.equal(ledger.cashCents, 5000);
-    assert.equal(ledger.equityCents, 5000);
-    assert.equal(formatUsd(ledger.equityCents), '$50.00');
+    assert.equal(ledger.startingCapitalCents, ACTIVE_EPOCH.capitalCents);
+    assert.equal(ledger.cashCents, ACTIVE_EPOCH.capitalCents);
+    assert.equal(ledger.equityCents, ACTIVE_EPOCH.capitalCents);
+    assert.equal(ledger.epochId, ACTIVE_EPOCH.epochId);
+    assert.equal(formatUsd(ledger.equityCents), '$1,000.00');
+    assert.equal(X_SIGNAL_V1.allocatedCapitalCents, dollarsToCents(50), 'the version is unchanged');
+    h.close();
+  });
+
+  it('runs a superseded epoch at its own capital, leaving the new one untouched', () => {
+    // The $50 run stays reconstructable: its ledger is its own, not a rewritten
+    // view of the current allocation.
+    const h = createHarness({ epoch: EPOCH_PAPER_50 });
+    const ledger = h.app.ledger.get();
+    assert.equal(ledger.startingCapitalCents, dollarsToCents(50));
+    assert.equal(ledger.epochId, EPOCH_PAPER_50.epochId);
     h.close();
   });
 
   it('is separate from the broker account balance', async () => {
     const h = createHarness({ posts: [bullishTier1Post(), corroboratingTier2Post()] });
     const account = await h.broker.getAccount();
-    assert.ok(account.cash >= 100_000, 'the simulated broker account holds far more than $50');
+    assert.ok(account.cash >= 100_000, 'the simulated broker account holds far more than the allocation');
 
     await h.app.runner.runCycle();
     const ledger = h.app.ledger.get();
+    // The account holds ~$100,000. The strategy is allowed $1,000 and must stay
+    // there: buying power it can see is not buying power it may use.
     assert.ok(
-      ledger.equityCents < 20_000,
-      'the strategy ledger must stay near its own $50 allocation, not the account balance',
+      ledger.equityCents <= ACTIVE_EPOCH.capitalCents * 1.5,
+      `the ledger must track its own ${formatUsd(ACTIVE_EPOCH.capitalCents)}, not the account balance`,
+    );
+    assert.ok(
+      ledger.equityCents < dollarsToCents(account.cash) / 10,
+      'the ledger must be nowhere near the broker account balance',
     );
     h.close();
   });
@@ -242,7 +265,7 @@ describe('capital ledger', () => {
     const ledger = h.app.ledger.get();
     assert.ok(ledger.cashCents >= 0, 'cash must never go negative');
     assert.ok(
-      ledger.cashCents + ledger.positionsValueCents <= 5000 * 1.5,
+      ledger.cashCents + ledger.positionsValueCents <= ACTIVE_EPOCH.capitalCents * 1.5,
       'the strategy cannot deploy more than its allocation',
     );
     h.close();
@@ -251,10 +274,14 @@ describe('capital ledger', () => {
   it('reserves capital so two proposals cannot spend the same dollar', () => {
     const h = createHarness();
     const before = h.app.ledger.availableCents();
-    assert.equal(h.app.ledger.reserve(2000, 'p1'), true);
-    assert.equal(h.app.ledger.availableCents(), before - 2000);
-    assert.equal(h.app.ledger.reserve(4000, 'p2'), false, 'the second reservation must be refused');
-    h.app.ledger.releaseReservation(2000, 'p1');
+    // Sized off the allocation so the arithmetic holds at any epoch capital:
+    // reserve most of it, then ask for more than what is left.
+    const most = Math.floor(before * 0.6);
+    const tooMuch = before - most + 1;
+    assert.equal(h.app.ledger.reserve(most, 'p1'), true);
+    assert.equal(h.app.ledger.availableCents(), before - most);
+    assert.equal(h.app.ledger.reserve(tooMuch, 'p2'), false, 'the second reservation must be refused');
+    h.app.ledger.releaseReservation(most, 'p1');
     assert.equal(h.app.ledger.availableCents(), before);
     h.close();
   });
@@ -345,6 +372,7 @@ describe('exit rules', () => {
       positionId: 'pos-1',
       strategyId: 'x-signal-v1',
       strategyVersion: '1.0.0',
+      epochId: 'paper-1000-v1',
       securityId: 'sec_NVDA',
       ticker: 'NVDA',
       direction: 'LONG',

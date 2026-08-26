@@ -257,6 +257,8 @@ export class PositionManager {
       positionId: entryPositionId(order),
       strategyId: this.strategyId,
       strategyVersion: this.strategyVersion,
+      // The epoch that funded the order also owns the position it opened.
+      epochId: order.epochId,
       securityId: order.securityId,
       ticker: order.ticker,
       direction: 'LONG',

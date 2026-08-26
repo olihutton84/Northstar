@@ -68,6 +68,8 @@ export class ReconciliationService {
     private readonly clock: Clock,
     logger: Logger,
     private readonly strategyId: string,
+    /** The execution epoch whose ledger this reconciliation counts. */
+    private readonly epochId: string,
   ) {
     this.log = logger.child('reconcile');
   }
@@ -290,7 +292,7 @@ export class ReconciliationService {
       ok,
       discrepancies,
       checked: {
-        ledgerEntries: this.store.ledger.entries(this.strategyId, 100_000).length,
+        ledgerEntries: this.store.ledger.entries(this.strategyId, this.epochId, 100_000).length,
         openOrders: openOrders.length,
         openPositions: openPositions.length,
         brokerOpenOrders: brokerOpenOrderCount,

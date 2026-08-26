@@ -9,7 +9,7 @@
  * caused it. Nothing is updated destructively except mutable working state
  * (position marks, order status, ledger cash); every decision is append-only.
  */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export const SCHEMA_SQL = `
 PRAGMA journal_mode = WAL;
@@ -220,6 +220,7 @@ CREATE TABLE IF NOT EXISTS orders (
   order_id        TEXT PRIMARY KEY,
   broker_order_id TEXT,
   strategy_id     TEXT NOT NULL,
+  epoch_id        TEXT NOT NULL DEFAULT '',
   proposal_id     TEXT,
   position_id     TEXT,
   security_id     TEXT NOT NULL,
@@ -263,6 +264,7 @@ CREATE TABLE IF NOT EXISTS positions (
   position_id      TEXT PRIMARY KEY,
   strategy_id      TEXT NOT NULL,
   strategy_version TEXT NOT NULL,
+  epoch_id         TEXT NOT NULL DEFAULT '',
   security_id      TEXT NOT NULL,
   ticker           TEXT NOT NULL,
   direction        TEXT NOT NULL,
@@ -294,8 +296,32 @@ CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(strategy_id, status
 CREATE INDEX IF NOT EXISTS idx_positions_security ON positions(strategy_id, security_id, status);
 
 -- ----------------------------------------------------------------- ledger
+-- ------------------------------------------------------- execution epochs
+-- An epoch is one clean run of capital. Capital is an EXECUTION setting and
+-- deliberately lives here rather than in the frozen strategy version, so the
+-- allocation can change without republishing the strategy. Each epoch owns its
+-- own ledger; superseding one never edits it.
+CREATE TABLE IF NOT EXISTS execution_epochs (
+  epoch_id              TEXT PRIMARY KEY,
+  strategy_id           TEXT NOT NULL,
+  label                 TEXT NOT NULL,
+  capital_cents         INTEGER NOT NULL,
+  status                TEXT NOT NULL,
+  started_at            TEXT NOT NULL,
+  ended_at              TEXT,
+  strategy_version      TEXT NOT NULL,
+  strategy_fingerprint  TEXT NOT NULL,
+  universe_version      TEXT NOT NULL DEFAULT '',
+  universe_origin       TEXT NOT NULL DEFAULT '',
+  universe_fingerprint  TEXT NOT NULL DEFAULT '',
+  config_snapshot_json  TEXT NOT NULL DEFAULT '{}',
+  rationale             TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_epochs_strategy ON execution_epochs(strategy_id, status);
+
 CREATE TABLE IF NOT EXISTS capital_ledger (
-  strategy_id             TEXT PRIMARY KEY,
+  strategy_id             TEXT NOT NULL,
+  epoch_id                TEXT NOT NULL DEFAULT '',
   starting_capital_cents  INTEGER NOT NULL,
   cash_cents              INTEGER NOT NULL,
   reserved_cents          INTEGER NOT NULL DEFAULT 0,
@@ -305,12 +331,16 @@ CREATE TABLE IF NOT EXISTS capital_ledger (
   fees_paid_cents         INTEGER NOT NULL DEFAULT 0,
   equity_cents            INTEGER NOT NULL,
   high_water_equity_cents INTEGER NOT NULL,
-  updated_at              TEXT NOT NULL
+  updated_at              TEXT NOT NULL,
+  -- Composite: one ledger per epoch, so a new epoch cannot overwrite the run
+  -- before it.
+  PRIMARY KEY (strategy_id, epoch_id)
 );
 
 CREATE TABLE IF NOT EXISTS ledger_entries (
   entry_id        TEXT PRIMARY KEY,
   strategy_id     TEXT NOT NULL,
+  epoch_id        TEXT NOT NULL DEFAULT '',
   at              TEXT NOT NULL,
   kind            TEXT NOT NULL,
   amount_cents    INTEGER NOT NULL,

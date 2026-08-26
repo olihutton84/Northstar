@@ -36,10 +36,97 @@ export class Database {
   }
 
   migrate(): void {
+    // Schema first, so a fresh database is complete before anything reads it.
+    // An EXISTING database is not touched by CREATE TABLE IF NOT EXISTS, so
+    // structural changes need the forward steps below as well.
+    const before = this.schemaVersion();
     this.raw.exec(SCHEMA_SQL);
+    this.upgradeFrom(before);
     this.raw
       .prepare('INSERT INTO schema_meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
       .run('schema_version', String(SCHEMA_VERSION));
+  }
+
+  /** The version recorded in the file, or null when the file is new. */
+  private schemaVersion(): number | null {
+    try {
+      const row = this.raw
+        .prepare("SELECT value FROM schema_meta WHERE key = 'schema_version'")
+        .get() as { value?: string } | undefined;
+      return row?.value === undefined ? null : Number(row.value);
+    } catch {
+      // No schema_meta table: the database has not been created yet.
+      return null;
+    }
+  }
+
+  /**
+   * Forward migrations for databases created by an earlier version.
+   *
+   * Each step is idempotent and additive. Nothing here deletes a row: an
+   * existing run's ledger, orders and positions are carried into the new shape
+   * rather than replaced, because they are the record of what actually traded.
+   */
+  private upgradeFrom(before: number | null): void {
+    if (before === null) return; // fresh database; SCHEMA_SQL already built it
+
+    if (before < 3) {
+      /*
+       * v3 introduces execution epochs.
+       *
+       * Capital moved out of the frozen strategy version and into an epoch, so
+       * the ledger is now keyed by (strategy_id, epoch_id) rather than by
+       * strategy alone. Everything already recorded belongs to the epoch that
+       * produced it — the original $50 run — and is labelled as such rather
+       * than being discarded or silently re-attributed to the new one.
+       */
+      const legacy = 'paper-50-v1';
+
+      for (const [table, column] of [
+        ['orders', 'epoch_id'],
+        ['positions', 'epoch_id'],
+        ['ledger_entries', 'epoch_id'],
+      ] as const) {
+        if (!this.hasColumn(table, column)) {
+          this.raw.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT NOT NULL DEFAULT ''`);
+        }
+        this.raw.exec(`UPDATE ${table} SET ${column} = '${legacy}' WHERE ${column} = ''`);
+      }
+
+      // SQLite cannot alter a primary key in place, so the ledger is rebuilt.
+      if (!this.hasColumn('capital_ledger', 'epoch_id')) {
+        this.raw.exec(`
+          ALTER TABLE capital_ledger RENAME TO capital_ledger_v2;
+          CREATE TABLE capital_ledger (
+            strategy_id             TEXT NOT NULL,
+            epoch_id                TEXT NOT NULL DEFAULT '',
+            starting_capital_cents  INTEGER NOT NULL,
+            cash_cents              INTEGER NOT NULL,
+            reserved_cents          INTEGER NOT NULL DEFAULT 0,
+            positions_value_cents   INTEGER NOT NULL DEFAULT 0,
+            unrealised_pnl_cents    INTEGER NOT NULL DEFAULT 0,
+            realised_pnl_cents      INTEGER NOT NULL DEFAULT 0,
+            fees_paid_cents         INTEGER NOT NULL DEFAULT 0,
+            equity_cents            INTEGER NOT NULL,
+            high_water_equity_cents INTEGER NOT NULL,
+            updated_at              TEXT NOT NULL,
+            PRIMARY KEY (strategy_id, epoch_id)
+          );
+          INSERT INTO capital_ledger
+            SELECT strategy_id, '${legacy}', starting_capital_cents, cash_cents,
+                   reserved_cents, positions_value_cents, unrealised_pnl_cents,
+                   realised_pnl_cents, fees_paid_cents, equity_cents,
+                   high_water_equity_cents, updated_at
+            FROM capital_ledger_v2;
+          DROP TABLE capital_ledger_v2;
+        `);
+      }
+    }
+  }
+
+  private hasColumn(table: string, column: string): boolean {
+    const rows = this.raw.prepare(`PRAGMA table_info(${table})`).all() as { name?: string }[];
+    return rows.some((r) => r.name === column);
   }
 
   run(sql: string, ...params: unknown[]): void {

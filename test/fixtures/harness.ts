@@ -16,6 +16,7 @@ import { FixtureSocialProvider, type FixturePost } from '../../src/providers/soc
 import { SimulatedBrokerProvider } from '../../src/providers/broker/SimulatedBrokerProvider.js';
 import type { BrokerProvider } from '../../src/providers/broker/BrokerProvider.js';
 import type { UniverseSource } from '../../src/universe/load.js';
+import { ACTIVE_EPOCH, type ExecutionEpochSpec } from '../../src/config/executionEpochs.js';
 import { SourceRegistry } from '../../src/providers/social/sourceRegistry.js';
 
 /** Tuesday 10 March 2026, 11:00 New York — the market is open. */
@@ -95,6 +96,13 @@ export interface HarnessOptions {
   databasePath?: string;
   /** Override operational cadences and rate gates. */
   operations?: Partial<OperationsConfig>;
+  /**
+   * Run under a specific execution epoch.
+   *
+   * Defaults to the ACTIVE one, so tests exercise the capital the bot really
+   * deploys. A test that is about a historical run pins that run's epoch.
+   */
+  epoch?: ExecutionEpochSpec;
 }
 
 export function createHarness(opts: HarnessOptions = {}): Harness {
@@ -126,6 +134,7 @@ export function createHarness(opts: HarnessOptions = {}): Harness {
     broker,
     databasePath: opts.databasePath ?? ':memory:',
     ...(opts.universeSource !== undefined ? { universeSource: opts.universeSource } : {}),
+    epoch: opts.epoch ?? ACTIVE_EPOCH,
     ...(opts.operations ? { operations: opts.operations } : {}),
   });
 

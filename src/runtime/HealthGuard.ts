@@ -72,6 +72,8 @@ export class HealthGuard {
     private readonly clock: Clock,
     logger: Logger,
     private readonly strategyId: string,
+    /** The execution epoch whose ledger this guard checks. */
+    private readonly epochId: string,
     private readonly config: CircuitBreakerConfig = DEFAULT_BREAKER_CONFIG,
   ) {
     this.log = logger.child('health');
@@ -145,6 +147,20 @@ export class HealthGuard {
 
   /* ------------------------------------------------------------- pause */
 
+  /**
+   * Operator pause: stop opening positions, keep managing the open ones.
+   *
+   * Deliberately NOT a stop. Exits, stop-losses, fills and reconciliation all
+   * continue, because a position the bot has stopped watching is more dangerous
+   * than one it is still managing. This only closes the front door.
+   *
+   * A killed strategy stays killed: pausing is a lesser state and must not
+   * quietly downgrade an emergency stop.
+   */
+  pauseByOperator(reason: string): Strategy {
+    return this.pause('MANUAL_PAUSE', reason);
+  }
+
   pause(fault: HealthFault, detail: string): Strategy {
     const strategy = this.strategy();
     if (strategy.runState === 'KILLED') return strategy;
@@ -159,7 +175,11 @@ export class HealthGuard {
     };
     this.store.strategies.upsert(updated);
     this.recordIncident(fault, detail, true);
-    this.log.error('strategy paused', { fault, detail });
+    // An operator choosing to pause is not a fault, and logging it at error
+    // level would page someone for a normal control action. A pause the SYSTEM
+    // imposed is a fault, and stays at error.
+    if (fault === 'MANUAL_PAUSE') this.log.warn('new entries paused by operator', { detail });
+    else this.log.error('strategy paused', { fault, detail });
 
     this.store.log.append({
       correlationId: randomId('pause'),
@@ -327,7 +347,7 @@ export class HealthGuard {
     }
     if (strategy.allocatedCapitalCents <= 0) problems.push('Allocated capital is zero or negative');
 
-    const ledger = this.store.ledger.get(this.strategyId);
+    const ledger = this.store.ledger.get(this.strategyId, this.epochId);
     if (!ledger) {
       problems.push('Capital ledger is missing');
     } else {

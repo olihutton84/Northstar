@@ -11,6 +11,7 @@ import type {
   CapitalLedger,
   DecisionLogEntry,
   DecisionStage,
+  ExecutionEpoch,
   Fill,
   FilterResult,
   HealthIncident,
@@ -692,16 +693,16 @@ export class OrderRepo {
 
   save(o: Order): void {
     this.db.run(
-      `INSERT INTO orders (order_id, broker_order_id, strategy_id, proposal_id, position_id, security_id, ticker,
-         side, quantity, notional_cents, type, time_in_force, mode, status, submitted_at, updated_at,
+      `INSERT INTO orders (order_id, broker_order_id, strategy_id, epoch_id, proposal_id, position_id, security_id,
+         ticker, side, quantity, notional_cents, type, time_in_force, mode, status, submitted_at, updated_at,
          filled_quantity, filled_avg_price, client_order_id, reject_reason, intent, correlation_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(order_id) DO UPDATE SET
          broker_order_id = excluded.broker_order_id, position_id = excluded.position_id,
          status = excluded.status, updated_at = excluded.updated_at,
          filled_quantity = excluded.filled_quantity, filled_avg_price = excluded.filled_avg_price,
          reject_reason = excluded.reject_reason`,
-      o.orderId, o.brokerOrderId, o.strategyId, o.proposalId, o.positionId, o.securityId, o.ticker,
+      o.orderId, o.brokerOrderId, o.strategyId, o.epochId, o.proposalId, o.positionId, o.securityId, o.ticker,
       o.side, o.quantity, o.notionalCents, o.type, o.timeInForce, o.mode, o.status, o.submittedAt, o.updatedAt,
       o.filledQuantity, o.filledAvgPrice, o.clientOrderId, o.rejectReason, o.intent, o.correlationId,
     );
@@ -712,6 +713,7 @@ export class OrderRepo {
       orderId: String(r['order_id']),
       brokerOrderId: strOrNull(r['broker_order_id']),
       strategyId: String(r['strategy_id']),
+      epochId: String(r['epoch_id'] ?? ''),
       proposalId: strOrNull(r['proposal_id']),
       positionId: strOrNull(r['position_id']),
       securityId: String(r['security_id']),
@@ -859,12 +861,12 @@ export class PositionRepo {
 
   save(p: Position): void {
     this.db.run(
-      `INSERT INTO positions (position_id, strategy_id, strategy_version, security_id, ticker, direction, status,
+      `INSERT INTO positions (position_id, strategy_id, strategy_version, epoch_id, security_id, ticker, direction, status,
          quantity, entry_price, entry_cost_cents, opened_at, entry_order_id, entry_signal_id, entry_proposal_id,
          entry_signal_score, invalidation_condition_json, high_water_price, last_mark_price, last_mark_at,
          unrealised_pnl_cents, exit_order_id, exit_price, exit_proceeds_cents, closed_at, exit_reason, exit_note,
          realised_pnl_cents, fees_cents, mode)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(position_id) DO UPDATE SET
          status = excluded.status, quantity = excluded.quantity, high_water_price = excluded.high_water_price,
          last_mark_price = excluded.last_mark_price, last_mark_at = excluded.last_mark_at,
@@ -872,7 +874,7 @@ export class PositionRepo {
          exit_price = excluded.exit_price, exit_proceeds_cents = excluded.exit_proceeds_cents,
          closed_at = excluded.closed_at, exit_reason = excluded.exit_reason, exit_note = excluded.exit_note,
          realised_pnl_cents = excluded.realised_pnl_cents, fees_cents = excluded.fees_cents`,
-      p.positionId, p.strategyId, p.strategyVersion, p.securityId, p.ticker, p.direction, p.status,
+      p.positionId, p.strategyId, p.strategyVersion, p.epochId, p.securityId, p.ticker, p.direction, p.status,
       p.quantity, p.entryPrice, p.entryCostCents, p.openedAt, p.entryOrderId, p.entrySignalId, p.entryProposalId,
       p.entrySignalScore, toJson(p.invalidationCondition), p.highWaterPrice, p.lastMarkPrice, p.lastMarkAt,
       p.unrealisedPnlCents, p.exitOrderId, p.exitPrice, p.exitProceedsCents, p.closedAt, p.exitReason,
@@ -885,6 +887,7 @@ export class PositionRepo {
       positionId: String(r['position_id']),
       strategyId: String(r['strategy_id']),
       strategyVersion: String(r['strategy_version']),
+      epochId: String(r['epoch_id'] ?? ''),
       securityId: String(r['security_id']),
       ticker: String(r['ticker']),
       direction: 'LONG',
@@ -946,16 +949,94 @@ export class PositionRepo {
   }
 }
 
+/* ------------------------------------------------------- execution epochs */
+
+/**
+ * Execution epochs.
+ *
+ * An epoch records the capital a run was given and the exact configuration it
+ * ran under, so a trade taken months ago can be reconstructed against the
+ * allocation, strategy version and universe that actually produced it. Epochs
+ * are append-only: superseding one closes it, never edits it.
+ */
+export class EpochRepo {
+  constructor(private readonly db: Database) {}
+
+  upsert(e: ExecutionEpoch): void {
+    this.db.run(
+      `INSERT INTO execution_epochs (epoch_id, strategy_id, label, capital_cents, status, started_at, ended_at,
+         strategy_version, strategy_fingerprint, universe_version, universe_origin, universe_fingerprint,
+         config_snapshot_json, rationale)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(epoch_id) DO UPDATE SET
+         status = excluded.status, ended_at = excluded.ended_at,
+         universe_version = excluded.universe_version, universe_origin = excluded.universe_origin,
+         universe_fingerprint = excluded.universe_fingerprint,
+         config_snapshot_json = excluded.config_snapshot_json`,
+      e.epochId, e.strategyId, e.label, e.capitalCents, e.status, e.startedAt, e.endedAt,
+      e.strategyVersion, e.strategyFingerprint, e.universeVersion, e.universeOrigin, e.universeFingerprint,
+      toJson(e.configSnapshot), e.rationale,
+    );
+  }
+
+  byId(epochId: string): ExecutionEpoch | null {
+    const r = this.db.get('SELECT * FROM execution_epochs WHERE epoch_id = ?', epochId);
+    return r ? EpochRepo.map(r) : null;
+  }
+
+  active(strategyId: string): ExecutionEpoch | null {
+    const r = this.db.get(
+      "SELECT * FROM execution_epochs WHERE strategy_id = ? AND status = 'ACTIVE' ORDER BY started_at DESC",
+      strategyId);
+    return r ? EpochRepo.map(r) : null;
+  }
+
+  all(strategyId: string): ExecutionEpoch[] {
+    return this.db
+      .all('SELECT * FROM execution_epochs WHERE strategy_id = ? ORDER BY started_at', strategyId)
+      .map(EpochRepo.map);
+  }
+
+  /** Close every epoch except the one now active. Never deletes. */
+  closeOthers(strategyId: string, activeEpochId: string, at: string): void {
+    this.db.run(
+      `UPDATE execution_epochs SET status = 'CLOSED', ended_at = COALESCE(ended_at, ?)
+       WHERE strategy_id = ? AND epoch_id != ? AND status = 'ACTIVE'`,
+      at, strategyId, activeEpochId,
+    );
+  }
+
+  private static map(r: Row): ExecutionEpoch {
+    return {
+      epochId: String(r['epoch_id']),
+      strategyId: String(r['strategy_id']),
+      label: String(r['label']),
+      capitalCents: Number(r['capital_cents']),
+      status: String(r['status']) as ExecutionEpoch['status'],
+      startedAt: String(r['started_at']),
+      endedAt: strOrNull(r['ended_at']),
+      strategyVersion: String(r['strategy_version']),
+      strategyFingerprint: String(r['strategy_fingerprint']),
+      universeVersion: String(r['universe_version'] ?? ''),
+      universeOrigin: String(r['universe_origin'] ?? ''),
+      universeFingerprint: String(r['universe_fingerprint'] ?? ''),
+      configSnapshot: jsonParse<Record<string, unknown>>(r['config_snapshot_json'], {}),
+      rationale: String(r['rationale'] ?? ''),
+    };
+  }
+}
+
 /* ---------------------------------------------------------------- ledger */
 
 export class LedgerRepo {
   constructor(private readonly db: Database) {}
 
-  init(strategyId: string, startingCapitalCents: number, at: string): CapitalLedger {
-    const existing = this.get(strategyId);
+  init(strategyId: string, epochId: string, startingCapitalCents: number, at: string): CapitalLedger {
+    const existing = this.get(strategyId, epochId);
     if (existing) return existing;
     const ledger: CapitalLedger = {
       strategyId,
+      epochId,
       startingCapitalCents,
       cashCents: startingCapitalCents,
       reservedCents: 0,
@@ -969,8 +1050,9 @@ export class LedgerRepo {
     };
     this.save(ledger);
     this.appendEntry({
-      entryId: deterministicId('led', strategyId, 'ALLOCATION', at),
+      entryId: deterministicId('led', strategyId, epochId, 'ALLOCATION', at),
       strategyId,
+      epochId,
       at,
       kind: 'ALLOCATION',
       amountCents: startingCapitalCents,
@@ -983,26 +1065,28 @@ export class LedgerRepo {
 
   save(l: CapitalLedger): void {
     this.db.run(
-      `INSERT INTO capital_ledger (strategy_id, starting_capital_cents, cash_cents, reserved_cents,
+      `INSERT INTO capital_ledger (strategy_id, epoch_id, starting_capital_cents, cash_cents, reserved_cents,
          positions_value_cents, unrealised_pnl_cents, realised_pnl_cents, fees_paid_cents, equity_cents,
          high_water_equity_cents, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(strategy_id) DO UPDATE SET
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(strategy_id, epoch_id) DO UPDATE SET
          cash_cents = excluded.cash_cents, reserved_cents = excluded.reserved_cents,
          positions_value_cents = excluded.positions_value_cents,
          unrealised_pnl_cents = excluded.unrealised_pnl_cents, realised_pnl_cents = excluded.realised_pnl_cents,
          fees_paid_cents = excluded.fees_paid_cents, equity_cents = excluded.equity_cents,
          high_water_equity_cents = excluded.high_water_equity_cents, updated_at = excluded.updated_at`,
-      l.strategyId, l.startingCapitalCents, l.cashCents, l.reservedCents, l.positionsValueCents,
+      l.strategyId, l.epochId, l.startingCapitalCents, l.cashCents, l.reservedCents, l.positionsValueCents,
       l.unrealisedPnlCents, l.realisedPnlCents, l.feesPaidCents, l.equityCents, l.highWaterEquityCents, l.updatedAt,
     );
   }
 
-  get(strategyId: string): CapitalLedger | null {
-    const r = this.db.get('SELECT * FROM capital_ledger WHERE strategy_id = ?', strategyId);
+  get(strategyId: string, epochId: string): CapitalLedger | null {
+    const r = this.db.get(
+      'SELECT * FROM capital_ledger WHERE strategy_id = ? AND epoch_id = ?', strategyId, epochId);
     if (!r) return null;
     return {
       strategyId: String(r['strategy_id']),
+      epochId: String(r['epoch_id']),
       startingCapitalCents: Number(r['starting_capital_cents']),
       cashCents: Number(r['cash_cents']),
       reservedCents: Number(r['reserved_cents']),
@@ -1018,18 +1102,22 @@ export class LedgerRepo {
 
   appendEntry(e: LedgerEntry): void {
     this.db.run(
-      `INSERT INTO ledger_entries (entry_id, strategy_id, at, kind, amount_cents, cash_after_cents, reference, note)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(entry_id) DO NOTHING`,
-      e.entryId, e.strategyId, e.at, e.kind, e.amountCents, e.cashAfterCents, e.reference, e.note,
+      `INSERT INTO ledger_entries (entry_id, strategy_id, epoch_id, at, kind, amount_cents, cash_after_cents,
+         reference, note)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(entry_id) DO NOTHING`,
+      e.entryId, e.strategyId, e.epochId, e.at, e.kind, e.amountCents, e.cashAfterCents, e.reference, e.note,
     );
   }
 
-  entries(strategyId: string, limit = 200): LedgerEntry[] {
+  entries(strategyId: string, epochId: string, limit = 200): LedgerEntry[] {
     return this.db
-      .all('SELECT * FROM ledger_entries WHERE strategy_id = ? ORDER BY at DESC LIMIT ?', strategyId, limit)
+      .all(
+        'SELECT * FROM ledger_entries WHERE strategy_id = ? AND epoch_id = ? ORDER BY at DESC LIMIT ?',
+        strategyId, epochId, limit)
       .map((r) => ({
         entryId: String(r['entry_id']),
         strategyId: String(r['strategy_id']),
+        epochId: String(r['epoch_id']),
         at: String(r['at']),
         kind: String(r['kind']) as LedgerEntry['kind'],
         amountCents: Number(r['amount_cents']),
@@ -1517,6 +1605,7 @@ export class Store {
   readonly bars: PriceBarRepo;
   readonly apiUsage: ApiUsageRepo;
   readonly cursors: CursorRepo;
+  readonly epochs: EpochRepo;
 
   constructor(readonly db: Database, readonly clock: Clock) {
     this.securities = new SecurityRepo(db);
@@ -1540,6 +1629,7 @@ export class Store {
     this.bars = new PriceBarRepo(db);
     this.apiUsage = new ApiUsageRepo(db);
     this.cursors = new CursorRepo(db, clock);
+    this.epochs = new EpochRepo(db);
   }
 
   close(): void {

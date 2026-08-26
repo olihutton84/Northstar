@@ -46,6 +46,16 @@ interface SimOrder extends BrokerOrder {
   requestedQuantity: number | null;
   requestedNotionalCents: number | null;
   pollCount: number;
+  /**
+   * Share count a notional order resolved to, fixed at first fill.
+   *
+   * A notional order buys a dollar amount, and the shares that amount buys are
+   * decided ONCE, at the price that was live when it filled. Recomputing the
+   * quantity from the current price on every poll makes the order grow when the
+   * price falls, filling again and again — the order's own share count drifting
+   * with the market it was supposed to have executed against.
+   */
+  resolvedQuantity: number | null;
 }
 
 export class SimulatedBrokerProvider implements BrokerProvider {
@@ -172,6 +182,7 @@ export class SimulatedBrokerProvider implements BrokerProvider {
       submittedQuantity: req.quantity ?? null,
       submittedNotionalCents: req.notionalCents ?? null,
       filledQuantity: 0,
+      resolvedQuantity: null,
       filledAvgPrice: null,
       submittedAt: now,
       updatedAt: now,
@@ -248,9 +259,19 @@ export class SimulatedBrokerProvider implements BrokerProvider {
     const slip = 1 + (order.side === 'BUY' ? this.slippageBps : -this.slippageBps) / 10_000;
     const price = quote.price * slip;
 
-    const totalQuantity =
-      order.requestedQuantity ??
-      (order.requestedNotionalCents !== null ? centsToDollars(order.requestedNotionalCents) / price : 0);
+    // Resolve the share count once, then hold it. A share order already has
+    // one; a notional order gets it from the price at its FIRST fill and keeps
+    // it, so a later price move cannot enlarge an order that already executed.
+    if (order.resolvedQuantity === null) {
+      const raw =
+        order.requestedQuantity ??
+        (order.requestedNotionalCents !== null ? centsToDollars(order.requestedNotionalCents) / price : 0);
+      // Rounded to the same precision the fills are, so a fully-filled order
+      // compares equal to its own total instead of landing a fraction of a
+      // share short and reporting PARTIALLY_FILLED forever.
+      order.resolvedQuantity = Number(raw.toFixed(6));
+    }
+    const totalQuantity = order.resolvedQuantity;
 
     const target = Number((totalQuantity * targetFraction).toFixed(6));
     const newlyFilled = Math.max(0, target - order.filledQuantity);

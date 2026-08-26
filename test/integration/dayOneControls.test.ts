@@ -240,7 +240,9 @@ describe('day-one trading behaviour', () => {
     assert.equal(h.app.store.positions.open(h.app.spec.strategyId).length, 0);
     // And equity is untouched: no fees, no slippage, no "just to be doing
     // something" entry.
-    assert.equal(h.app.ledger.get().equityCents, h.app.spec.riskLimits.startingCapitalCents);
+    // The EPOCH's capital: the allocation the bot actually deploys, not the
+    // figure frozen into the strategy version.
+    assert.equal(h.app.ledger.get().equityCents, h.app.epoch.capitalCents);
     h.close();
   });
 

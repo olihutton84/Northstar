@@ -14,6 +14,8 @@
 import { formatUsd, round } from '../core/index.js';
 import { marketStatus } from '../providers/marketdata/marketCalendar.js';
 import type { NorthstarApp } from '../app.js';
+import { fingerprintVersion } from '../config/strategyRegistry.js';
+import { maxPositionCentsFor } from '../config/executionEpochs.js';
 
 export interface ObservabilityPayload {
   at: string;
@@ -92,10 +94,42 @@ export interface ObservabilityPayload {
   strategy: {
     strategyId: string;
     version: string;
+    /** Content hash of the frozen version. Moves only if the version does. */
+    fingerprint: string;
     status: string;
     runState: string;
     haltReason: string | null;
     haltedAt: string | null;
+  };
+
+  /**
+   * The execution epoch: the capital actually behind this run.
+   *
+   * Separate from the strategy version on purpose. The version declares what it
+   * published; the epoch says what is being deployed now.
+   */
+  epoch: {
+    epochId: string;
+    label: string;
+    capitalAllocation: string;
+    capitalAllocationCents: number;
+    maxPosition: string;
+    maxPositionCents: number;
+    maxHoldings: number;
+  };
+
+  /**
+   * Whether the bot may place an order with no human in the loop, and if not,
+   * exactly why. The reason is the point: "blocked" without a cause is an
+   * invitation to guess.
+   */
+  autonomy: {
+    tier: string;
+    enabled: boolean;
+    state: 'ENABLED' | 'BLOCKED';
+    blockReason: string | null;
+    requiresHumanApproval: boolean;
+    checks: { id: string; label: string; passed: boolean; detail: string }[];
   };
 
   killSwitch: {
@@ -196,6 +230,9 @@ export function buildObservability(app: NorthstarApp): ObservabilityPayload {
   const now = app.clock.nowIso();
   const nowMs = app.clock.nowMs();
   const strategyId = app.spec.strategyId;
+  const autonomy = app.autonomy.evaluate();
+  const maxPositionCents = maxPositionCentsFor(
+    app.epoch.capitalCents, app.spec.riskLimits.maxPositionPctOfEquity);
 
   const providers = app.describeProviders();
   const health = app.health.state();
@@ -309,10 +346,30 @@ export function buildObservability(app: NorthstarApp): ObservabilityPayload {
     strategy: {
       strategyId,
       version: app.spec.version,
+      fingerprint: fingerprintVersion(app.spec),
       status: survival.status,
       runState: strategy?.runState ?? 'UNKNOWN',
       haltReason: strategy?.haltReason ?? null,
       haltedAt: strategy?.haltedAt ?? null,
+    },
+
+    epoch: {
+      epochId: app.epoch.epochId,
+      label: app.epoch.label,
+      capitalAllocation: formatUsd(app.epoch.capitalCents),
+      capitalAllocationCents: app.epoch.capitalCents,
+      maxPosition: formatUsd(maxPositionCents),
+      maxPositionCents,
+      maxHoldings: app.spec.riskLimits.maxConcurrentPositions,
+    },
+
+    autonomy: {
+      tier: autonomy.tier,
+      enabled: autonomy.autonomous,
+      state: autonomy.autonomous ? 'ENABLED' : 'BLOCKED',
+      blockReason: autonomy.blockReason,
+      requiresHumanApproval: autonomy.requiresHumanApproval,
+      checks: autonomy.checks,
     },
 
     killSwitch: {

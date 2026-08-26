@@ -26,6 +26,8 @@ import {
   X_STRATEGY_ID,
   type StrategyVersionSpec,
 } from './config/strategyRegistry.js';
+import { ACTIVE_EPOCH, maxPositionCentsFor, type ExecutionEpochSpec } from './config/executionEpochs.js';
+import { assessStorage, type StorageAssessment } from './runtime/StorageCheck.js';
 import type { Strategy, TradingMode } from './domain/types.js';
 import { openDatabase } from './persistence/db.js';
 import { Store } from './persistence/store.js';
@@ -60,6 +62,7 @@ import { FunnelService } from './runtime/Funnel.js';
 import { HealthGuard } from './runtime/HealthGuard.js';
 import { PollingPolicy } from './runtime/PollingPolicy.js';
 import { ReadinessService } from './runtime/Readiness.js';
+import { AutonomyGate } from './runtime/AutonomyGate.js';
 import { ReconciliationService } from './runtime/Reconciliation.js';
 import { Scheduler } from './runtime/Scheduler.js';
 import { SessionWatch } from './runtime/SessionWatch.js';
@@ -81,6 +84,14 @@ export interface NorthstarAppOptions {
   broker?: BrokerProvider;
   databasePath?: string;
   strategySpec?: StrategyVersionSpec;
+  /**
+   * Override the execution epoch (tests, replay).
+   *
+   * Production takes the active epoch from the declared registry, never from
+   * the environment: a typo in a deployment variable must not be able to change
+   * how much capital the bot deploys.
+   */
+  epoch?: ExecutionEpochSpec;
   /** Override operational cadences (tests, replay). */
   operations?: Partial<OperationsConfig>;
   /** Supply the universe directly (tests, or a future HTTP source). */
@@ -95,6 +106,8 @@ export class NorthstarApp {
   readonly universe: UniverseRegistry;
   readonly sourceRegistry: SourceRegistry;
   readonly spec: StrategyVersionSpec;
+  /** The execution epoch this run deploys capital under. */
+  readonly epoch: ExecutionEpochSpec;
   readonly signalConfig: SignalEngineConfig;
   readonly ops: OperationsConfig;
   readonly mode: TradingMode;
@@ -127,6 +140,8 @@ export class NorthstarApp {
   readonly audit: SignalAuditService;
   readonly reconciliation: ReconciliationService;
   readonly readiness: ReadinessService;
+  /** Decides whether orders may be placed with no human in the loop. */
+  readonly autonomy: AutonomyGate;
   readonly scheduler: Scheduler;
   readonly session: SessionWatch;
   readonly funnel: FunnelService;
@@ -147,6 +162,17 @@ export class NorthstarApp {
 
     this.spec = opts.strategySpec ?? latestVersion(X_STRATEGY_ID);
     this.signalConfig = getSignalConfig(this.spec.signalConfigId);
+
+    /*
+     * The execution epoch decides the capital, not the strategy version.
+     *
+     * `x-signal-v1` declares $50 and keeps declaring it — that number is inside
+     * its fingerprint and is the historical record of what the published
+     * version said. What the bot actually deploys is the ACTIVE epoch's
+     * capital, which can change without republishing the strategy because
+     * capital is an execution decision, not a belief about the market.
+     */
+    this.epoch = opts.epoch ?? ACTIVE_EPOCH;
 
     /* ----------------------------------------------------- universe --- */
     /*
@@ -183,8 +209,9 @@ export class NorthstarApp {
     this.broker = opts.broker ?? this.buildBroker(this.mode);
 
     /* ------------------------------------------------------ services --- */
-    this.ledger = new CapitalLedgerService(this.store, this.clock, this.logger, this.spec.strategyId);
-    this.health = new HealthGuard(this.store, this.clock, this.logger, this.spec.strategyId, {
+    this.ledger = new CapitalLedgerService(
+      this.store, this.clock, this.logger, this.spec.strategyId, this.epoch.epochId);
+    this.health = new HealthGuard(this.store, this.clock, this.logger, this.spec.strategyId, this.epoch.epochId, {
       socialFailureTolerance: this.env.xFailureTolerance,
       brokerFailureTolerance: 3,
       marketDataFailureTolerance: 5,
@@ -285,6 +312,7 @@ export class NorthstarApp {
       this.clock,
       this.logger,
       this.spec.strategyId,
+      this.epoch.epochId,
     );
 
     this.funnel = new FunnelService(this.store, this.clock, this.spec.strategyId, this.apiMeter);
@@ -300,8 +328,10 @@ export class NorthstarApp {
     });
 
     this.readiness = new ReadinessService(this, this.clock, this.logger);
+    this.autonomy = new AutonomyGate(this);
 
     this.runner = new StrategyRunner({
+      autonomy: this.autonomy,
       store: this.store,
       universe: this.universe,
       clock: this.clock,
@@ -351,6 +381,7 @@ export class NorthstarApp {
       logger: this.logger,
       session: this.session,
       onStart: () => this.recordRunConfiguration('scheduler'),
+      refreshReadiness: () => this.refreshReadiness(),
     });
   }
 
@@ -371,7 +402,8 @@ export class NorthstarApp {
       mode: this.mode,
       createdAt: now,
       updatedAt: now,
-      allocatedCapitalCents: this.spec.allocatedCapitalCents,
+      // The EPOCH's capital, not the version's. See the epoch registry.
+      allocatedCapitalCents: this.epoch.capitalCents,
       benchmarkTicker: this.spec.benchmarkTicker,
       universeSources: this.spec.universeSources,
       riskLimits: this.spec.riskLimits,
@@ -403,7 +435,8 @@ export class NorthstarApp {
       this.store.authors.upsert(author);
     }
 
-    this.ledger.init(this.spec.allocatedCapitalCents);
+    this.recordEpoch(now);
+    this.ledger.init(this.epoch.capitalCents);
     return strategy;
   }
 
@@ -530,6 +563,88 @@ export class NorthstarApp {
    * credentials. Nothing from `process.env` and nothing from `this.env`
    * reaches it — see the test that asserts the written payload is clean.
    */
+  /**
+   * Write the active epoch, and close any other that still claims to be active.
+   *
+   * The snapshot is taken here rather than assembled at read time so a run
+   * stays reconstructable: months later, the allocation, strategy version,
+   * fingerprint, universe and operational settings that produced a trade are
+   * all readable from one row, whatever the code has since become.
+   */
+  private recordEpoch(at: string): void {
+    const universe = this.universe.origin();
+    this.store.epochs.upsert({
+      epochId: this.epoch.epochId,
+      strategyId: this.epoch.strategyId,
+      label: this.epoch.label,
+      capitalCents: this.epoch.capitalCents,
+      status: 'ACTIVE',
+      startedAt: this.store.epochs.byId(this.epoch.epochId)?.startedAt ?? at,
+      endedAt: null,
+      strategyVersion: this.spec.version,
+      strategyFingerprint: fingerprintVersion(this.spec),
+      universeVersion: universe.version,
+      universeOrigin: universe.origin,
+      universeFingerprint: universe.fingerprint,
+      configSnapshot: {
+        maxPositionPctOfEquity: this.spec.riskLimits.maxPositionPctOfEquity,
+        maxConcurrentPositions: this.spec.riskLimits.maxConcurrentPositions,
+        maxPositionCents: maxPositionCentsFor(
+          this.epoch.capitalCents, this.spec.riskLimits.maxPositionPctOfEquity),
+        minSignalScore: this.spec.riskLimits.minSignalScore,
+        allowLeverage: this.spec.riskLimits.allowLeverage,
+        allowMargin: this.spec.riskLimits.allowMargin,
+        allowOptions: this.spec.riskLimits.allowOptions,
+        allowShorting: this.spec.riskLimits.allowShorting,
+        xScanIntervalSeconds: this.ops.xScanIntervalSeconds,
+        positionMonitorIntervalSeconds: this.ops.positionMonitorIntervalSeconds,
+        reconciliationIntervalSeconds: this.ops.reconciliationIntervalSeconds,
+        signalTtlMinutes: this.ops.signalTtlMinutes,
+        proposalTtlMinutes: this.ops.proposalTtlMinutes,
+        sameTickerCooldownMinutes: this.ops.sameTickerCooldownMinutes,
+      },
+      rationale: this.epoch.rationale,
+    });
+
+    // Exactly one epoch may be active. Closing rather than deleting keeps the
+    // superseded run's ledger and history intact.
+    this.store.epochs.closeOthers(this.epoch.strategyId, this.epoch.epochId, at);
+  }
+
+  /**
+   * Whether the database survives a restart.
+   *
+   * Exposed here so the autonomy gate and the console read the same assessment
+   * the startup banner printed, rather than each forming its own opinion.
+   */
+  storage(): StorageAssessment {
+    return assessStorage(this.env.databasePath);
+  }
+
+  /**
+   * Run readiness and hand the verdict to the autonomy gate.
+   *
+   * A failure to RUN readiness is itself a blocking answer: the gate is told it
+   * did not pass. Silence would leave a stale pass in force and let the bot keep
+   * trading on a verdict that is no longer true.
+   */
+  async refreshReadiness(): Promise<void> {
+    try {
+      const report = await this.readiness.run();
+      this.autonomy.noteReadiness({
+        passed: report.readyForRealDataPaper,
+        at: report.at,
+        summary: report.readyForRealDataPaperReason,
+      });
+    } catch (e) {
+      this.autonomy.noteReadiness({
+        passed: false,
+        at: this.clock.nowIso(),
+        summary: `Readiness could not be evaluated: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
+  }
+
   recordRunConfiguration(trigger: string): void {
     const providers = this.describeProviders();
     this.store.log.append({

@@ -304,6 +304,26 @@ export class ApiServer {
       this.sendJson(res, 200, { strategy, cancelled, liquidate: b.liquidate === true });
     });
 
+    /*
+     * PAUSE NEW ENTRIES. Not a stop.
+     *
+     * Open orders are deliberately NOT cancelled and positions are deliberately
+     * NOT closed: an order already working and a position already held keep
+     * being managed, exits included. This closes the front door only. The
+     * emergency controls are `kill` above.
+     */
+    r('POST', /^\/api\/control\/pause$/, (_req, res, _params, body) => {
+      const b = (body ?? {}) as { reason?: string };
+      const strategy = this.app.health.pauseByOperator(
+        b.reason ?? 'Manual pause from the X Bot Console');
+      this.sendJson(res, 200, {
+        strategy,
+        entriesBlocked: true,
+        exitsStillRunning: true,
+        note: 'New entries are blocked. Exits, fills and reconciliation continue.',
+      });
+    });
+
     r('POST', /^\/api\/control\/resume$/, (_req, res, _params, body) => {
       const b = (body ?? {}) as { note?: string };
       this.sendJson(res, 200, this.app.health.resume(b.note ?? 'Resumed from the X Bot Console'));

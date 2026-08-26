@@ -32,7 +32,16 @@ import { bullishTier1Post, corroboratingTier2Post, createHarness } from '../fixt
  * perfectly: the order exists, the answer did not arrive.
  */
 class AcceptsThenTimesOutBroker implements BrokerProvider {
-  readonly brokerId = 'alpaca';
+  /*
+   * Identifies as SIMULATED, deliberately.
+   *
+   * This broker reproduces Alpaca's failure shapes, but it is not an Alpaca
+   * account and the data driving these tests is fixture data. Claiming to be
+   * 'alpaca' would (correctly) trip the autonomy gate, which refuses to let
+   * fixture-derived orders reach a real account — the gate would be right, and
+   * these tests are about ambiguous submissions, not about the gate.
+   */
+  readonly brokerId = 'simulated';
   readonly mode = 'PAPER' as const;
 
   /** Orders the broker really holds, keyed by client order id. */

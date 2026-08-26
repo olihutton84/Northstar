@@ -458,6 +458,8 @@ export interface Order {
   orderId: string;
   brokerOrderId: string | null;
   strategyId: string;
+  /** The execution epoch whose capital funded this order. */
+  epochId: string;
   proposalId: string | null;
   positionId: string | null;
   securityId: string;
@@ -515,6 +517,8 @@ export interface Position {
   positionId: string;
   strategyId: string;
   strategyVersion: string;
+  /** The execution epoch whose capital funded this position. */
+  epochId: string;
   securityId: string;
   ticker: string;
   direction: TradeDirection;
@@ -551,8 +555,49 @@ export interface Position {
  * account balance: the account may hold far more money than this strategy is
  * allowed to touch.
  */
+/**
+ * One clean run of capital.
+ *
+ * Capital is an EXECUTION setting, not part of the frozen strategy version: how
+ * much money an operator puts behind a strategy is not a belief about the
+ * market, and changing it does not change a single score, weight or threshold.
+ * So it lives in an epoch, and `x-signal-v1` stays frozen.
+ *
+ * Each epoch owns its own ledger and every order and position taken under it
+ * points back at it, so a run stays reconstructable against the allocation,
+ * strategy version and universe that actually produced it.
+ */
+export interface ExecutionEpoch {
+  epochId: string;
+  strategyId: string;
+  label: string;
+  /** What the ledger started at. */
+  capitalCents: Cents;
+  status: 'ACTIVE' | 'CLOSED';
+  startedAt: string;
+  endedAt: string | null;
+  strategyVersion: string;
+  /** The strategy fingerprint in force when this epoch started. */
+  strategyFingerprint: string;
+  universeVersion: string;
+  universeOrigin: string;
+  universeFingerprint: string;
+  /** Operational configuration as it stood at the start of the epoch. */
+  configSnapshot: Record<string, unknown>;
+  rationale: string;
+}
+
 export interface CapitalLedger {
   strategyId: string;
+  /**
+   * The execution epoch this ledger belongs to.
+   *
+   * Capital is an execution setting, not part of the frozen strategy version,
+   * so a strategy can have several ledgers over its life — one per epoch. They
+   * never merge: superseding an epoch leaves its ledger exactly as it was
+   * traded.
+   */
+  epochId: string;
   startingCapitalCents: Cents;
   cashCents: Cents;
   /** Cash committed to unfilled entry orders. */
@@ -570,6 +615,7 @@ export interface CapitalLedger {
 export interface LedgerEntry {
   entryId: string;
   strategyId: string;
+  epochId: string;
   at: string;
   kind:
     | 'ALLOCATION'
@@ -772,7 +818,15 @@ export type HealthFault =
   | 'SOCIAL_PROVIDER_FAILURE'
   | 'CORRUPT_STRATEGY_STATE'
   | 'LEDGER_MISMATCH'
-  | 'MANUAL_KILL';
+  | 'MANUAL_KILL'
+  /**
+   * An operator chose to stop opening positions.
+   *
+   * Distinct from a fault: nothing is wrong. It is recorded as its own cause so
+   * a deliberate pause is never mistaken for a system failure when the incident
+   * log is read back.
+   */
+  | 'MANUAL_PAUSE';
 
 export interface HealthIncident {
   incidentId: string;

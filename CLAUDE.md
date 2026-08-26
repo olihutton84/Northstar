@@ -12,7 +12,7 @@ reports without the Platform being reachable.
 - X ingestion, filtering, entity resolution, deduplication
 - Signal scoring and explanation
 - Tiingo price confirmation
-- The risk engine and virtual strategy capital (the $50 ledger)
+- The risk engine and virtual strategy capital (the execution-epoch ledger)
 - Alpaca **PAPER** execution, orders, fills, positions, exits
 - Reconciliation, restart recovery, the kill switch
 - The autonomous runner and API efficiency
@@ -78,6 +78,56 @@ strategy fingerprint. They are kept as the **integration contract**: the
 vocabulary the Platform uses when it hands over membership. Renaming them would
 republish the strategy version for no behavioural gain.
 
+## Execution epochs — capital without republishing the strategy
+
+`x-signal-v1` declares a $50 allocation and always will: that figure is inside
+its fingerprint and is the record of what the published version said. What the
+bot actually deploys comes from the **active execution epoch**.
+
+```
+src/config/executionEpochs.ts   declared epochs, oldest first; the last is active
+```
+
+| | |
+|---|---|
+| Active epoch | `paper-1000-v1` — **$1,000** |
+| Max position | **$200** (20% of equity, derived not restated) |
+| Max holdings | 5 |
+| Version still says | $50 (frozen, fingerprint `b45f2bbd5224201a`) |
+
+How much capital an operator puts behind a strategy is an execution decision,
+not a belief about the market — it changes no score, weight or threshold. So it
+lives in an epoch. Each epoch owns its own ledger, and every order, position and
+ledger entry carries its `epochId`. Superseding an epoch **closes** it; it never
+edits it, so the $50 run stays exactly as it traded.
+
+Epochs are declared in code, not read from the environment: a typo in a
+deployment variable must not be able to change how much money the bot deploys.
+
+## Execution tiers and autonomous PAPER
+
+The tier is **derived from the wiring**, never declared by a flag
+(`src/runtime/AutonomyGate.ts`):
+
+| Tier | Data | Broker | Autonomous? |
+|---|---|---|---|
+| `SIMULATION` | fixtures | simulated | yes — nothing real is touched |
+| `PAPER` | real X + Tiingo | Alpaca PAPER | yes, once every gate passes |
+| `LIVE` | real | Alpaca LIVE | **never** — a human approves every order |
+| `INCOHERENT` | fixtures | Alpaca | **blocked** |
+
+`INCOHERENT` is the case that matters. Alpaca PAPER is a real account with a
+real audit trail; fixture-driven orders written into it would be a fictional
+track record indistinguishable from a genuine one. Fixture data may only reach a
+simulated broker, and a real broker may only be reached by real data.
+
+There is **no override**. A test seam permitting fixtures to reach a real broker
+would be the exact bug the gate exists to prevent. Tests get automatic routing
+by genuinely being in `SIMULATION`.
+
+LIVE is decided first and by either witness — the broker's mode or the strategy
+mode — so a simulated broker running in LIVE mode still requires a human.
+
 ## Rules for future work in this repo
 
 1. Do not build Platform features here. If a task needs portfolio, research,
@@ -85,6 +135,7 @@ republish the strategy version for no behavioural gain.
 2. Do not hard-code Platform state. Membership arrives through the contract.
 3. Do not change `x-signal-v1`. A material change is `x-signal-v2`; the
    fingerprint test in `test/unit/strategyFreeze.test.ts` enforces this.
+   Capital is **not** a material change — see the execution epochs below.
 4. Do not enable LIVE. This release is Alpaca PAPER only.
 5. Keep the bot independently deployable — the Platform being down is never a
    reason the bot cannot run.

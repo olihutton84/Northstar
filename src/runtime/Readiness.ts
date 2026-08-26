@@ -187,6 +187,7 @@ export class ReadinessService {
       this.clock,
       this.log,
       this.app.spec.strategyId,
+      this.app.epoch.epochId,
     );
     const reconciliation = await reconciler.reconcile();
     const critical = reconciliation.discrepancies.filter((d) => d.severity === 'CRITICAL');

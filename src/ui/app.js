@@ -235,6 +235,21 @@ function ago(minutes) {
   return `${(minutes / 1440).toFixed(1)}d ago`;
 }
 
+/**
+ * The one line an operator needs when execution is blocked.
+ *
+ * Fixture data reaching a real account is the case worth naming explicitly:
+ * every other block is a configuration detail, that one is a trading-record
+ * integrity problem.
+ */
+function blockHeadline(a) {
+  const failed = a.checks.filter((c) => !c.passed).map((c) => c.id);
+  if (failed.includes('live-x')) return 'LIVE X DATA REQUIRED';
+  if (failed.includes('real-market-data')) return 'REAL MARKET DATA REQUIRED';
+  if (a.requiresHumanApproval) return 'LIVE ORDERS REQUIRE HUMAN APPROVAL';
+  return a.blockReason || 'gate not satisfied';
+}
+
 function cell(label, value, tone, sub) {
   return `<div class="health-cell ${tone}">
     <div class="k">${esc(label)}</div>
@@ -269,6 +284,8 @@ function renderHealth() {
     `Process up ${ago(up)} · ${p.allReal ? 'all providers live' : 'fixtures in use'}` +
     (p.forcedFixtures ? ' (forced by NORTHSTAR_USE_FIXTURES)' : '');
 
+  const a = health.autonomy;
+  const e = health.epoch;
   const killTone = health.killSwitch.engaged ? 'bad' : 'ok';
   const runTone = health.strategy.runState === 'RUNNING' ? 'ok'
     : health.strategy.runState === 'KILLED' ? 'bad' : 'warn';
@@ -278,6 +295,12 @@ function renderHealth() {
     ${cell('Market data', p.marketData, p.marketData === 'TIINGO' ? 'ok' : 'warn', p.ids.marketData)}
     ${cell('Broker', p.broker, p.broker.startsWith('ALPACA') ? 'ok' : 'warn', p.ids.broker)}
     ${cell('Mode', p.mode, p.mode === 'LIVE' ? 'warn' : 'ok', `strategy ${health.strategy.version}`)}
+    ${cell('Autonomous execution', a.state, a.enabled ? 'ok' : 'bad',
+      a.enabled ? `${a.tier} · orders route automatically` : `${a.tier} · ${blockHeadline(a)}`)}
+    ${cell('Capital allocation', e.capitalAllocation, 'ok',
+      `max position ${e.maxPosition} · ${e.maxHoldings} holdings · ${e.label}`)}
+    ${cell('Invested', health.ledger.positionsValue ?? '—', '',
+      `cash ${health.ledger.cash ?? '—'} · reserved ${health.ledger.reserved}`)}
     ${cell('Universe', p.universe.origin === 'PLATFORM' ? 'PLATFORM' : 'BOT FALLBACK',
       p.universe.origin === 'PLATFORM' ? 'ok' : 'warn',
       p.universe.rejection
@@ -316,6 +339,13 @@ function renderHealth() {
       health.killSwitch.openIncidents.length ? 'bad' : 'ok',
       health.killSwitch.openIncidents[0]?.fault ?? 'none')}
   </div>
+  ${!a.enabled ? `<div class="banner" style="margin-top:12px">
+      AUTONOMOUS EXECUTION: BLOCKED<br>REASON: ${esc(blockHeadline(a))}
+      ${a.checks.filter((c) => !c.passed).length > 1
+        ? `<div style="margin-top:6px;opacity:.85;font-weight:normal">${
+            a.checks.filter((c) => !c.passed).map((c) => esc(c.detail)).join('<br>')}</div>`
+        : ''}
+    </div>` : ''}
   ${health.risk.breached ? `<div class="banner" style="margin-top:12px">Risk breach: ${esc(health.risk.breachReasons.join('; '))}</div>` : ''}
   ${!health.ledger.integrityOk ? `<div class="banner" style="margin-top:12px">${esc(health.ledger.integrityDetail)}</div>` : ''}`;
 }
