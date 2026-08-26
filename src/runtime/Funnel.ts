@@ -4,12 +4,12 @@
  * One number per stage, from the request that started it to the trade that
  * ended it:
  *
- *   X requests → posts received → posts stored → posts accepted →
- *   material events → candidates → signals → proposals → risk-approved →
+ *   X scans → posts received → posts stored → posts accepted →
+ *   material events → signals → proposals → risk-approved →
  *   orders → fills → positions opened → positions closed
  *
  * The point is diagnosis by subtraction. "Zero trades" is not one condition,
- * it is thirteen different ones, and the funnel says which: no posts at all is
+ * it is a dozen different ones, and the funnel says which: no posts at all is
  * a credential or query problem; posts but no accepted posts is a filter that
  * is too tight; signals but no proposals is a threshold; proposals but no
  * orders is risk. Without this the operator is left guessing at the end of a
@@ -67,14 +67,23 @@ export class FunnelService {
 
   report(fromIso = this.dayStart(), toIso = this.clock.nowIso()): FunnelReport {
     const api = this.meter.today();
-    const xRequests = api.find((a) => a.provider === 'x')?.requests ?? 0;
+
+    // Requests are counted from the ingest record rather than from vendor
+    // telemetry, because the funnel must describe the PIPELINE's activity: a
+    // fixture or replay run makes no vendor calls and would otherwise read as
+    // "the bot never reached X", which is exactly backwards. Vendor telemetry
+    // has its own panel, where the distinction matters.
+    const ingests = this.store.log
+      .byStage(this.strategyId, 'INGEST', 500)
+      .filter((e) => e.at >= fromIso && e.at <= toIso);
+    const payloadNumber = (e: (typeof ingests)[number], key: string): number =>
+      Number((e.payload as Record<string, unknown>)[key] ?? 0);
+
+    const xRequests = ingests.reduce((sum, e) => sum + payloadNumber(e, 'requestCount'), 0);
 
     // Posts received includes duplicates the vendor returned again; posts
     // stored is what was new. The gap between them is what the cursor saves.
-    const postsReceived = this.store.log
-      .byStage(this.strategyId, 'INGEST', 500)
-      .filter((e) => e.at >= fromIso && e.at <= toIso)
-      .reduce((sum, e) => sum + Number((e.payload as Record<string, unknown>)['fetched'] ?? 0), 0);
+    const postsReceived = ingests.reduce((sum, e) => sum + payloadNumber(e, 'fetched'), 0);
 
     const postsStored = this.count(
       'SELECT COUNT(*) AS n FROM social_events WHERE captured_at >= ? AND captured_at <= ?',
@@ -137,7 +146,7 @@ export class FunnelService {
     );
 
     const stages: FunnelStage[] = [
-      { stage: 'X requests', count: xRequests, meaning: 'the bot never reached X — credentials, network or a halted loop' },
+      { stage: 'X scans', count: xRequests, meaning: 'the scan loop never ran — check the process is up and not halted' },
       { stage: 'Posts received', count: postsReceived, meaning: 'X returned nothing — the query matched no posts in the window' },
       { stage: 'Posts stored (new)', count: postsStored, meaning: 'every post was already seen — the cursor is working and nothing is new' },
       { stage: 'Posts accepted', count: postsAccepted, meaning: 'every post was filtered out as noise, off-universe or unusable' },
@@ -151,7 +160,10 @@ export class FunnelService {
       { stage: 'Positions closed', count: closed, meaning: 'nothing exited today' },
     ];
 
-    const stalled = stages.find((s) => s.count === 0) ?? null;
+    // The terminal stage is excluded from stall detection: opening a position
+    // and holding it overnight is the intended behaviour, not a funnel that
+    // stopped. Everything above it genuinely blocks the next stage.
+    const stalled = stages.slice(0, -1).find((s) => s.count === 0) ?? null;
 
     return {
       fromIso,

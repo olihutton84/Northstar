@@ -153,7 +153,7 @@ risk.
 `npm run funnel` turns "nothing happened" into a specific answer:
 
 ```
-  X requests              214
+  X scans                 214
   Posts received           38
   Posts stored (new)       31
   Posts accepted            4
@@ -161,8 +161,8 @@ risk.
   Signals generated         0     <- stopped here
 ```
 
-Each stage carries what a zero at that stage means. Zero X requests is a
-credential or loop problem; posts but no accepted posts is a filter question;
+Each stage carries what a zero at that stage means. Zero X scans is a stopped
+or halted loop; posts but no accepted posts is a filter question;
 signals but no proposals is a threshold; proposals but no orders is risk.
 
 **A funnel that narrows to zero is a normal outcome, not a fault.** There is no
