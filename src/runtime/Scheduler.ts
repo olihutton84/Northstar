@@ -51,6 +51,8 @@ export interface SchedulerOptions {
   logger: Logger;
   /** Watches for the open and the close. Optional in tests and replay. */
   session?: SessionWatch | null;
+  /** Records the session's configuration when the run starts. */
+  onStart?: () => void;
   /** Called after every task, for the CLI line and the dashboard. */
   onEvent?: (event: SchedulerEvent) => void;
   /** Stop after this many X scans. Used by tests and `--cycles`. */
@@ -291,6 +293,9 @@ export class Scheduler {
     this.scanLimit = opts.maxScans ?? this.o.maxScans;
 
     this.o.session?.prime();
+    // Before the first scan: what configuration produced everything that
+    // follows, written where it survives the process.
+    this.o.onStart?.();
 
     this.log.info('scheduler started', {
       xScanSeconds: this.o.ops.xScanIntervalSeconds,

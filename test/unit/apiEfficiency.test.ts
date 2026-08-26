@@ -466,3 +466,61 @@ describe('operations config', () => {
     assert.ok(slow.requests < fast.requests);
   });
 });
+
+/* -------------------------------------------------- configuration wiring */
+
+describe('operational settings are actually wired', () => {
+  it('honours the cold-start lookback rather than an internal default', async () => {
+    const { createHarness } = await import('../fixtures/harness.js');
+    const post = (minutesAgo: number) => ({
+      postId: `age-${minutesAgo}`,
+      handle: 'nvidia',
+      displayName: 'NVIDIA',
+      verified: true,
+      followerCount: 3_000_000,
+      text: 'NVIDIA raises guidance for the third quarter to $32.5B, up 24% sequentially. $NVDA',
+      minutesAgo,
+      likes: 2500,
+      reposts: 800,
+      baselineEngagement: 900,
+    });
+
+    // A setting that exists, is documented and is environment-overridable must
+    // do something. This one was read by nothing: the real lookback was a
+    // hard-coded 60 minutes, so NORTHSTAR_X_COLD_START_MINUTES was a lie.
+    const wide = createHarness({ posts: [post(90)], operations: { xColdStartLookbackMinutes: 120 } });
+    const wideResult = await wide.app.runner.runCycle();
+    assert.equal(wideResult.ingested, 1, 'a 90-minute-old post is inside a 120-minute lookback');
+    wide.close();
+
+    const narrow = createHarness({ posts: [post(90)], operations: { xColdStartLookbackMinutes: 10 } });
+    const narrowResult = await narrow.app.runner.runCycle();
+    assert.equal(narrowResult.ingested, 0, 'and outside a 10-minute one');
+    narrow.close();
+  });
+
+  it('uses the configured default cold-start window', async () => {
+    const { createHarness } = await import('../fixtures/harness.js');
+    const { DEFAULT_OPERATIONS: OPS } = await import('../../src/config/operations.js');
+    const build = (minutesAgo: number) => ({
+      postId: `d-${minutesAgo}`,
+      handle: 'nvidia',
+      displayName: 'NVIDIA',
+      verified: true,
+      followerCount: 3_000_000,
+      text: 'NVIDIA raises guidance for the third quarter to $32.5B, up 24% sequentially. $NVDA',
+      minutesAgo,
+      likes: 2500,
+      reposts: 800,
+      baselineEngagement: 900,
+    });
+
+    const inside = createHarness({ posts: [build(OPS.xColdStartLookbackMinutes - 10)] });
+    assert.equal((await inside.app.runner.runCycle()).ingested, 1);
+    inside.close();
+
+    const outside = createHarness({ posts: [build(OPS.xColdStartLookbackMinutes + 10)] });
+    assert.equal((await outside.app.runner.runCycle()).ingested, 0);
+    outside.close();
+  });
+});

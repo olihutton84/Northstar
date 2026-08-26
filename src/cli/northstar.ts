@@ -136,6 +136,8 @@ async function main(): Promise<void> {
       const app = makeApp(modeArg(args));
       app.seed();
       printProviderBanner(app);
+      // A one-off cycle is as much a part of the record as a full session.
+      app.recordRunConfiguration('cycle');
       const report = await app.runner.runCycle();
       heading('Cycle report');
       out(JSON.stringify(report, null, 2));

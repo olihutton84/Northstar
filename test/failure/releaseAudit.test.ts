@@ -18,7 +18,9 @@ import { join } from 'node:path';
 
 import { FixedClock, NullLogger, dollarsToCents, formatUsd } from '../../src/core/index.js';
 import { NorthstarApp } from '../../src/app.js';
-import { X_SIGNAL_V1 } from '../../src/config/strategyRegistry.js';
+import { X_SIGNAL_V1, X_SIGNAL_V1_FINGERPRINT } from '../../src/config/strategyRegistry.js';
+import { SIGNAL_CONFIG_V1 } from '../../src/config/signalConfig.js';
+import { DEFAULT_OPERATIONS } from '../../src/config/operations.js';
 import { TiingoMarketDataProvider } from '../../src/providers/marketdata/TiingoMarketDataProvider.js';
 import { MarketDataError } from '../../src/providers/marketdata/MarketDataProvider.js';
 import { openDatabase } from '../../src/persistence/db.js';
@@ -694,6 +696,68 @@ describe('an exit is never permanently disarmed', () => {
     const attempts = h.app.store.orders.byPosition(position.positionId).filter((o) => o.intent === 'EXIT');
     assert.equal(attempts.length, 2, 'the retry is a distinct, recorded attempt');
     assert.ok(h.app.ledger.verifyIntegrity().ok);
+    h.close();
+  });
+});
+
+/* ------------------------------------------ 26. run configuration snapshot */
+
+describe('the session records what configuration produced it', () => {
+  function snapshot(h: ReturnType<typeof createHarness>): Record<string, unknown> {
+    const row = h.app.store.log
+      .byStage(h.app.spec.strategyId, 'SYSTEM', 10)
+      .find((e) => (e.payload as Record<string, unknown>)['strategyVersion'] !== undefined);
+    assert.ok(row, 'a configuration snapshot must be written');
+    return row!.payload as Record<string, unknown>;
+  }
+
+  it('captures weights, thresholds, cadence and capital by value', () => {
+    const h = createHarness({ posts: [] });
+    h.app.recordRunConfiguration('test');
+    const p = snapshot(h);
+
+    // By value, not by reference: `signalConfigId` alone is a pointer into
+    // code, which explains nothing once the code has moved on.
+    assert.deepEqual(p['convictionWeights'], SIGNAL_CONFIG_V1.convictionWeights);
+    assert.deepEqual(p['bands'], SIGNAL_CONFIG_V1.bands);
+    assert.deepEqual(p['riskLimits'], X_SIGNAL_V1.riskLimits);
+    assert.deepEqual(p['exitRules'], X_SIGNAL_V1.exitRules);
+    assert.equal(p['allocatedCapitalCents'], X_SIGNAL_V1.allocatedCapitalCents);
+    assert.equal(p['strategyVersion'], X_SIGNAL_V1.version);
+    assert.equal(p['strategyFingerprint'], X_SIGNAL_V1_FINGERPRINT);
+
+    const ops = p['operations'] as Record<string, number>;
+    assert.equal(ops['xScanIntervalSeconds'], DEFAULT_OPERATIONS.xScanIntervalSeconds);
+    assert.equal(ops['sameTickerCooldownMinutes'], DEFAULT_OPERATIONS.sameTickerCooldownMinutes);
+    assert.equal(ops['signalTtlMinutes'], DEFAULT_OPERATIONS.signalTtlMinutes);
+    h.close();
+  });
+
+  it('distinguishes two runs of the same strategy with different operations', () => {
+    const a = createHarness({ posts: [], operations: { sameTickerCooldownMinutes: 5 } });
+    a.app.recordRunConfiguration('test');
+    const opsA = (snapshot(a)['operations'] as Record<string, number>)['sameTickerCooldownMinutes'];
+    a.close();
+
+    const b = createHarness({ posts: [], operations: { sameTickerCooldownMinutes: 90 } });
+    b.app.recordRunConfiguration('test');
+    const opsB = (snapshot(b)['operations'] as Record<string, number>)['sameTickerCooldownMinutes'];
+    b.close();
+
+    // Same strategy version, materially different experiment. The record has
+    // to be able to tell them apart.
+    assert.equal(opsA, 5);
+    assert.equal(opsB, 90);
+  });
+
+  it('contains no credential, however the environment is set', () => {
+    const h = createHarness({ posts: [] });
+    h.app.recordRunConfiguration('test');
+    const serialised = JSON.stringify(snapshot(h));
+
+    for (const forbidden of ['Bearer', 'APCA', 'token=', 'secretKey', 'keyId', 'BEARER_TOKEN', 'SECRET_KEY']) {
+      assert.ok(!serialised.includes(forbidden), `snapshot must not contain "${forbidden}"`);
+    }
     h.close();
   });
 });

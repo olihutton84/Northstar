@@ -8,7 +8,7 @@
  * production without a single conditional inside the strategy.
  */
 import type { Clock, Logger } from './core/index.js';
-import { ConsoleLogger, SystemClock } from './core/index.js';
+import { ConsoleLogger, randomId, SystemClock } from './core/index.js';
 import {
   alpacaPaperCredentialReport,
   loadAlpacaCredentials,
@@ -21,6 +21,7 @@ import {
 import { estimateDailyXRequests, loadOperations, type OperationsConfig } from './config/operations.js';
 import { getSignalConfig, type SignalEngineConfig } from './config/signalConfig.js';
 import {
+  fingerprintVersion,
   latestVersion,
   X_STRATEGY_ID,
   type StrategyVersionSpec,
@@ -180,6 +181,11 @@ export class NorthstarApp {
       universe: this.universe,
       clock: this.clock,
       logger: this.logger,
+      // These come from OperationsConfig rather than the service's own
+      // defaults. Left unwired, NORTHSTAR_X_COLD_START_MINUTES was a setting
+      // that existed, was documented, and did nothing.
+      lookbackMinutes: this.ops.xColdStartLookbackMinutes,
+      limit: this.ops.xMaxResultsPerRequest,
     });
     this.filter = new PostFilter();
     this.resolver = new TickerResolver(this.universe);
@@ -329,6 +335,7 @@ export class NorthstarApp {
       clock: this.clock,
       logger: this.logger,
       session: this.session,
+      onStart: () => this.recordRunConfiguration('scheduler'),
     });
   }
 
@@ -487,6 +494,81 @@ export class NorthstarApp {
         }`,
       );
     }
+  }
+
+  /**
+   * Persist the exact, non-secret configuration this session is running.
+   *
+   * The strategy version spec alone is not enough to explain a day's results.
+   * It records WHAT the strategy believes but not HOW FAST it acted, and it
+   * stores the signal config by id — a pointer into code, which is only
+   * meaningful while that code still exists unchanged. A month from now,
+   * "x-signal-v1 with a 30-minute cooldown" and "x-signal-v1 with a 5-minute
+   * cooldown" would be indistinguishable in the record, though they are not
+   * the same experiment.
+   *
+   * So the full picture is written to the append-only decision log at the
+   * moment a session begins: weights, thresholds, bands, risk limits, exit
+   * rules, cadence, cooldown, expiries and capital.
+   *
+   * Assembled field by field from configuration objects that hold no
+   * credentials. Nothing from `process.env` and nothing from `this.env`
+   * reaches it — see the test that asserts the written payload is clean.
+   */
+  recordRunConfiguration(trigger: string): void {
+    const providers = this.describeProviders();
+    this.store.log.append({
+      correlationId: randomId('run'),
+      strategyId: this.spec.strategyId,
+      stage: 'SYSTEM',
+      subjectId: `${this.spec.strategyId}@${this.spec.version}`,
+      summary: `Session configuration for ${this.spec.strategyId} v${this.spec.version} (${trigger})`,
+      payload: {
+        trigger,
+        startedAt: this.clock.nowIso(),
+        strategyId: this.spec.strategyId,
+        strategyVersion: this.spec.version,
+        strategyFingerprint: fingerprintVersion(this.spec),
+        signalConfigId: this.signalConfig.signalConfigId,
+
+        // Component weights and thresholds, by value rather than by reference.
+        convictionWeights: this.signalConfig.convictionWeights,
+        bands: this.signalConfig.bands,
+        maxPriceContribution: this.signalConfig.maxPriceContribution,
+        priceGateMinAbsBase: this.signalConfig.priceGateMinAbsBase,
+        recencyHalfLifeHours: this.signalConfig.recencyHalfLifeHours,
+        maxEventAgeHours: this.signalConfig.maxEventAgeHours,
+        resignalIntervalMinutes: this.signalConfig.resignalIntervalMinutes,
+
+        riskLimits: this.spec.riskLimits,
+        exitRules: this.spec.exitRules,
+        allocatedCapitalCents: this.spec.allocatedCapitalCents,
+        benchmarkTicker: this.spec.benchmarkTicker,
+        universeSources: this.spec.universeSources,
+        universeSize: this.universe.all().length,
+
+        operations: this.ops,
+        requestsPerScan: this.requestsPerScan(),
+        estimatedDailyXRequests: this.estimateDailyRequests().requests,
+
+        // Provider identities, never their credentials.
+        providers: {
+          x: providers.x,
+          marketData: providers.marketData,
+          broker: providers.broker,
+          mode: providers.mode,
+          socialProviderId: this.social.providerId,
+          marketDataProviderId: this.marketData.providerId,
+          brokerId: this.broker.brokerId,
+        },
+      },
+    });
+
+    this.logger.child('run').info('session configuration recorded', {
+      strategyVersion: this.spec.version,
+      fingerprint: fingerprintVersion(this.spec),
+      trigger,
+    });
   }
 
   /**
