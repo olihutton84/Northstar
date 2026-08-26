@@ -54,6 +54,11 @@ export class ReplaySocialProvider implements SocialDataProvider {
     return { healthy: true, detail: `replay social provider, ${this.events.length} events` };
   }
 
+  /** One logical query, so one notional request. */
+  plannedRequestsPerScan(): number {
+    return 1;
+  }
+
   async fetch(query: SocialQuery): Promise<SocialFetchResult> {
     const nowIso = this.clock.nowIso();
     const visible = this.events.filter((e) => e.capturedAt <= nowIso && e.postedAt >= query.since);

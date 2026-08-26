@@ -184,8 +184,11 @@ export function alpacaPaperCredentialReport(): CredentialReport {
  */
 export function loadAlpacaCredentials(mode: TradingMode): AlpacaCredentials {
   if (mode === 'PAPER') {
-    const keyId = process.env['ALPACA_PAPER_KEY_ID'] ?? '';
-    const secretKey = process.env['ALPACA_PAPER_SECRET_KEY'] ?? '';
+    // Trimmed, exactly as `alpacaPaperCredentialReport` trims: the two paths
+    // must agree on what "configured" means, or readiness can report a
+    // credential present that the broker then reads as blank.
+    const keyId = raw('ALPACA_PAPER_KEY_ID') ?? '';
+    const secretKey = raw('ALPACA_PAPER_SECRET_KEY') ?? '';
     if (!keyId || !secretKey) {
       throw new Error(
         'Alpaca PAPER credentials missing: set ALPACA_PAPER_KEY_ID and ALPACA_PAPER_SECRET_KEY.',
@@ -205,8 +208,8 @@ export function loadAlpacaCredentials(mode: TradingMode): AlpacaCredentials {
       'LIVE trading is disabled. Set NORTHSTAR_LIVE_TRADING_ENABLED=true to construct a LIVE broker.',
     );
   }
-  const keyId = process.env['ALPACA_LIVE_KEY_ID'] ?? '';
-  const secretKey = process.env['ALPACA_LIVE_SECRET_KEY'] ?? '';
+  const keyId = raw('ALPACA_LIVE_KEY_ID') ?? '';
+  const secretKey = raw('ALPACA_LIVE_SECRET_KEY') ?? '';
   if (!keyId || !secretKey) {
     throw new Error(
       'Alpaca LIVE credentials missing: set ALPACA_LIVE_KEY_ID and ALPACA_LIVE_SECRET_KEY.',

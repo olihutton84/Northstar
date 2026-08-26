@@ -12,7 +12,6 @@
  * gets mistaken for "X has been quiet for an hour".
  */
 import { formatUsd, round } from '../core/index.js';
-import { estimateDailyXRequests } from '../config/operations.js';
 import { marketStatus } from '../providers/marketdata/marketCalendar.js';
 import type { NorthstarApp } from '../app.js';
 
@@ -132,6 +131,8 @@ export interface ObservabilityPayload {
     reconciliationSeconds: number;
     sameTickerCooldownMinutes: number;
     signalTtlMinutes: number;
+    /** Vendor requests one scan really costs, from the provider's batching. */
+    requestsPerScan: number;
     estimatedDailyXRequests: number;
   };
 
@@ -348,7 +349,8 @@ export function buildObservability(app: NorthstarApp): ObservabilityPayload {
       reconciliationSeconds: app.ops.reconciliationIntervalSeconds,
       sameTickerCooldownMinutes: app.ops.sameTickerCooldownMinutes,
       signalTtlMinutes: app.ops.signalTtlMinutes,
-      estimatedDailyXRequests: estimateDailyXRequests(app.ops, { queriesPerScan: 1, hoursActive: 6.5 }).requests,
+      requestsPerScan: app.requestsPerScan(),
+      estimatedDailyXRequests: app.estimateDailyRequests().requests,
     },
 
     api: app.apiMeter.today().map((u) => {

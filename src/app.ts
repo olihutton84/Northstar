@@ -18,7 +18,7 @@ import {
   type CredentialReport,
   type NorthstarEnv,
 } from './config/env.js';
-import { loadOperations, type OperationsConfig } from './config/operations.js';
+import { estimateDailyXRequests, loadOperations, type OperationsConfig } from './config/operations.js';
 import { getSignalConfig, type SignalEngineConfig } from './config/signalConfig.js';
 import {
   latestVersion,
@@ -487,6 +487,34 @@ export class NorthstarApp {
         }`,
       );
     }
+  }
+
+  /**
+   * What one X scan actually costs, right now.
+   *
+   * Asked of the CONSTRUCTED provider against the LIVE universe, so it reflects
+   * the queries that will really be sent. Reading it from anywhere else — a
+   * constant, an assumption of one query per scan — produces a budget that is
+   * confidently wrong, which is worse than no budget at all.
+   */
+  requestsPerScan(): number {
+    const strategy = this.store.strategies.byId(this.spec.strategyId);
+    const sources = strategy?.universeSources ?? this.spec.universeSources;
+    const { tickers, keywords } = this.universe.searchTerms(sources);
+    return this.social.plannedRequestsPerScan({
+      tickers,
+      keywords,
+      since: this.clock.nowIso(),
+      limit: this.ops.xMaxResultsPerRequest,
+    });
+  }
+
+  /** Projected X requests for a full session at the configured cadence. */
+  estimateDailyRequests(hoursActive = 6.5): ReturnType<typeof estimateDailyXRequests> {
+    return estimateDailyXRequests(this.ops, {
+      queriesPerScan: this.requestsPerScan(),
+      hoursActive,
+    });
   }
 
   /* ------------------------------------------------------------- banner */

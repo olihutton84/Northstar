@@ -36,7 +36,14 @@ export interface OperationsConfig {
   xColdStartLookbackMinutes: number;
   /** Maximum posts requested per X search request. */
   xMaxResultsPerRequest: number;
-  /** Soft daily request budget; crossing it moves polling to API pressure. */
+  /**
+   * Runaway guard: crossing it moves polling to the API-pressure cadence.
+   *
+   * This is NOT a normal-operation throttle. It must sit comfortably above a
+   * heavy day's projected usage, or the bot spends the afternoon throttling
+   * itself for no reason; and comfortably below what a loop bug would burn, so
+   * a runaway is caught in minutes rather than hours.
+   */
   xDailyRequestSoftCap: number;
 
   /* --------------------------------------------------------- market data */
@@ -94,7 +101,10 @@ export const DEFAULT_OPERATIONS: OperationsConfig = {
   xMaxBackoffSeconds: 900,
   xColdStartLookbackMinutes: 30,
   xMaxResultsPerRequest: 100,
-  xDailyRequestSoftCap: 400,
+  // A 29-name universe batches into 2 query chunks, so a 6.5h session at 120s
+  // costs ~390-490 requests and a long pre-market start ~600. 900 clears that
+  // with headroom while still catching a runaway loop within minutes.
+  xDailyRequestSoftCap: 900,
 
   positionMonitorIntervalSeconds: 60,
   quoteCacheSeconds: 45,

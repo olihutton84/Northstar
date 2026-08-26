@@ -61,4 +61,13 @@ export interface SocialDataProvider {
   /** Cheap reachability/credential check used by the health guard. */
   healthCheck(): Promise<{ healthy: boolean; detail: string }>;
   fetch(query: SocialQuery): Promise<SocialFetchResult>;
+  /**
+   * How many vendor requests ONE scan of this query would cost.
+   *
+   * Asked before the day starts, so the request budget can be checked against
+   * the plan rather than discovered halfway through the morning. It must be
+   * derived from the same batching the provider actually performs — a
+   * hard-coded guess here is worse than no estimate, because it is believed.
+   */
+  plannedRequestsPerScan(query: SocialQuery): number;
 }

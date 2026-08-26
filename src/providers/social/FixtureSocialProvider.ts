@@ -84,6 +84,11 @@ export class FixtureSocialProvider implements SocialDataProvider {
     return { healthy: true, detail: `fixture provider with ${this.posts.length} posts` };
   }
 
+  /** One logical query, so one notional request. */
+  plannedRequestsPerScan(): number {
+    return 1;
+  }
+
   async fetch(query: SocialQuery): Promise<SocialFetchResult> {
     this.fetchCount += 1;
     if (this.failWith) throw this.failWith;

@@ -158,13 +158,21 @@ async function main(): Promise<void> {
       printProviderBanner(app);
 
       const ops = app.ops;
-      const estimate = estimateDailyXRequests(ops, { queriesPerScan: 1, hoursActive: 6.5 });
+      const perScan = app.requestsPerScan();
+      const estimate = app.estimateDailyRequests();
       out();
       out(`${BOLD}Cadences${RESET}`);
       out(`  X scan             every ${ops.xScanIntervalSeconds}s  (${ops.xEventWatchIntervalSeconds}s on event watch, ${ops.xApiPressureIntervalSeconds}s under API pressure)`);
       out(`  Position monitor   every ${ops.positionMonitorIntervalSeconds}s  (marks, exits, fills — no X requests)`);
       out(`  Reconciliation     every ${ops.reconciliationIntervalSeconds}s  (plus immediately after any order event)`);
-      out(`  ${DIM}Estimated X requests for a full trading day: ~${estimate.requests}${RESET}`);
+      out(`  ${DIM}${perScan} batched quer${perScan === 1 ? 'y' : 'ies'} per scan · ` +
+        `~${estimate.requests} X requests for a 6.5h trading day · ` +
+        `soft cap ${ops.xDailyRequestSoftCap}${RESET}`);
+      if (estimate.requests > ops.xDailyRequestSoftCap) {
+        out(`  ${YELLOW}WARNING: the projected day exceeds the soft cap, so polling will throttle ` +
+          `itself to ${ops.xApiPressureIntervalSeconds}s partway through. Raise ` +
+          `NORTHSTAR_X_DAILY_SOFT_CAP or slow the scan cadence.${RESET}`);
+      }
       out();
       out('Paper loop started. Ctrl-C to stop.');
 

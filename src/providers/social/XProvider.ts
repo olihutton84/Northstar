@@ -153,6 +153,11 @@ export class XProvider implements SocialDataProvider {
     return chunks;
   }
 
+  /** One request per batched chunk — the same batching `fetch` performs. */
+  plannedRequestsPerScan(query: SocialQuery): number {
+    return Math.max(1, this.buildQueries(query).length);
+  }
+
   /**
    * One scan.
    *

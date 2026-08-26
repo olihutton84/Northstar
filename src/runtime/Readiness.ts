@@ -284,6 +284,9 @@ export class ReadinessService {
     /* ------------------------------------------- 13. database healthy */
     add(this.databaseCheck());
 
+    /* ------------------------------------- 14. the request budget adds up */
+    add(this.requestBudgetCheck());
+
     const passed = checks.filter((c) => c.status === 'PASS').length;
     const failed = checks.filter((c) => c.status === 'FAIL').length;
     const warned = checks.filter((c) => c.status === 'WARN').length;
@@ -332,6 +335,42 @@ export class ReadinessService {
         blockers.length === 0
           ? 'All checks passed, all three providers are real, and LIVE is disabled.'
           : blockers.join('; '),
+    };
+  }
+
+  /**
+   * Does a full day of polling fit inside the request budget?
+   *
+   * Checked from the provider's OWN batching against the live universe, before
+   * the open. The failure this prevents is specific and was real: a universe
+   * that batches into two query chunks costs twice what a one-query-per-scan
+   * assumption predicts, quietly crosses the daily cap mid-morning, and drops
+   * the bot to the slow cadence for the rest of the session. That is a bad way
+   * to discover arithmetic.
+   */
+  private requestBudgetCheck(): ReadinessCheck {
+    const perScan = this.app.requestsPerScan();
+    const day = this.app.estimateDailyRequests();
+    const cap = this.app.ops.xDailyRequestSoftCap;
+    const headroomPct = cap > 0 ? Math.round(((cap - day.requests) / cap) * 100) : 0;
+    const fits = day.requests <= cap;
+
+    return {
+      id: 'x-request-budget',
+      label: 'X request budget adds up',
+      status: fits ? 'PASS' : 'FAIL',
+      detail:
+        `${perScan} batched quer${perScan === 1 ? 'y' : 'ies'} per scan; ` +
+        `~${day.requests} requests projected for a 6.5h session against a ${cap} soft cap ` +
+        `(${headroomPct}% headroom). ${day.detail}`,
+      ...(fits
+        ? {}
+        : {
+            remedy:
+              `The projected day exceeds the cap, so polling would throttle itself to ` +
+              `${this.app.ops.xApiPressureIntervalSeconds}s partway through. Raise ` +
+              `NORTHSTAR_X_DAILY_SOFT_CAP, or slow NORTHSTAR_X_SCAN_SECONDS.`,
+          }),
     };
   }
 
