@@ -28,6 +28,13 @@ import {
 } from './config/strategyRegistry.js';
 import { ACTIVE_EPOCH, maxPositionCentsFor, type ExecutionEpochSpec } from './config/executionEpochs.js';
 import { assessStorage, type StorageAssessment } from './runtime/StorageCheck.js';
+import { ManualSocialProvider } from './providers/social/ManualSocialProvider.js';
+import { ManualIngestService } from './ingest/ManualIngestService.js';
+import {
+  manualIngestPermitted,
+  resolveWindow,
+  type ManualIngestWindow,
+} from './config/manualIngest.js';
 import type { Strategy, TradingMode } from './domain/types.js';
 import { openDatabase } from './persistence/db.js';
 import { Store } from './persistence/store.js';
@@ -142,6 +149,8 @@ export class NorthstarApp {
   readonly readiness: ReadinessService;
   /** Decides whether orders may be placed with no human in the loop. */
   readonly autonomy: AutonomyGate;
+  /** Accepts operator-supplied X posts during the temporary experiment. */
+  readonly manualIngest: ManualIngestService;
   readonly scheduler: Scheduler;
   readonly session: SessionWatch;
   readonly funnel: FunnelService;
@@ -329,6 +338,8 @@ export class NorthstarApp {
 
     this.readiness = new ReadinessService(this, this.clock, this.logger);
     this.autonomy = new AutonomyGate(this);
+    this.manualIngest = new ManualIngestService(
+      this.store, this.clock, this.logger, this.spec.strategyId);
 
     this.runner = new StrategyRunner({
       autonomy: this.autonomy,
@@ -471,7 +482,27 @@ export class NorthstarApp {
     const credentials = xCredentialReport(this.env);
     this.assertNotPartial(credentials);
 
-    if (this.env.useFixtures || credentials.state === 'ABSENT') {
+    /*
+     * The manual-X experiment, when one is open.
+     *
+     * Chosen only when there is no real API token to use — it exists because
+     * the API costs money, not to override it — and NEVER in LIVE, which is
+     * enforced here as well as in the gate. Two independent refusals, because
+     * this is the one path where hand-typed evidence could reach a broker.
+     */
+    if (this.env.useFixtures) {
+      return new FixtureSocialProvider({ clock: this.clock, registry: this.sourceRegistry });
+    }
+
+    if (credentials.state === 'ABSENT' && this.manualIngestSelectable()) {
+      return new ManualSocialProvider({
+        clock: this.clock,
+        store: this.store,
+        registry: this.sourceRegistry,
+      });
+    }
+
+    if (credentials.state === 'ABSENT') {
       return new FixtureSocialProvider({ clock: this.clock, registry: this.sourceRegistry });
     }
     return new XProvider({
@@ -612,6 +643,40 @@ export class NorthstarApp {
   }
 
   /**
+   * Is the manual-X experiment open, and is this a run allowed to use it?
+   *
+   * LIVE is refused outright — not held for approval, refused. Alpaca LIVE
+   * commits real money, and hand-transcribed evidence is not a basis for that
+   * however honest the transcription. The experiment exists to test a strategy
+   * on real posts without paying for the API, not to shorten the path to money.
+   */
+  private manualIngestSelectable(): boolean {
+    if (this.mode === 'LIVE') return false;
+    return this.manualWindow().active;
+  }
+
+  /** The manual-X experiment window as it stands right now. */
+  manualWindow(): ManualIngestWindow {
+    return resolveWindow(this.store.manualWindows.latest(this.spec.strategyId), this.clock);
+  }
+
+  /**
+   * May manual observations count as real observed data for THIS run?
+   *
+   * Both the window and the mode, every time. Asked by the autonomy gate rather
+   * than cached, so an expiry that passes mid-session withdraws autonomous
+   * execution at the next proposal.
+   */
+  manualIngestPermission(): { permitted: boolean; reason: string } {
+    const strategyMode = this.store.strategies.byId(this.spec.strategyId)?.mode ?? this.mode;
+    return manualIngestPermitted(
+      this.manualWindow(),
+      this.broker.mode === 'LIVE' ? 'LIVE' : 'PAPER',
+      strategyMode === 'LIVE' ? 'LIVE' : 'PAPER',
+    );
+  }
+
+  /**
    * Whether the database survives a restart.
    *
    * Exposed here so the autonomy gate and the console read the same assessment
@@ -744,7 +809,15 @@ export class NorthstarApp {
    */
   describeProviders(): ProviderSummary {
     const forced = this.env.useFixtures;
-    const social = this.social.providerId === 'x-api-v2' ? 'LIVE' : 'FIXTURE';
+    /*
+     * Three states, not two. A manual post is real, but it is not the API, and
+     * a dashboard that showed "LIVE" for hand-typed evidence would be lying
+     * about where the bot's information comes from.
+     */
+    const social: ProviderSummary['x'] =
+      this.social.providerId === 'x-api-v2' ? 'LIVE'
+      : this.social.providerId === 'x-manual' ? 'MANUAL'
+      : 'FIXTURE';
     const marketData = this.marketData.providerId === 'tiingo' ? 'TIINGO' : 'FIXTURE';
     const broker = this.broker.brokerId === 'alpaca' ? `ALPACA ${this.broker.mode}` : 'SIMULATED';
     const mode = this.store.strategies.byId(this.spec.strategyId)?.mode ?? this.mode;
@@ -757,6 +830,7 @@ export class NorthstarApp {
       universe: this.universe.origin(),
       allReal: social === 'LIVE' && marketData === 'TIINGO' && this.broker.brokerId === 'alpaca',
       forcedFixtures: forced,
+      manual: this.manualWindow(),
     };
   }
 }
@@ -770,7 +844,12 @@ export class ConfigurationError extends Error {
 }
 
 export interface ProviderSummary {
-  x: 'LIVE' | 'FIXTURE';
+  /**
+   * `MANUAL` is real, operator-supplied X posts during the temporary
+   * experiment. Deliberately not folded into `LIVE`: they are real data, but
+   * they are not the API, and the difference is auditable.
+   */
+  x: 'LIVE' | 'MANUAL' | 'FIXTURE';
   marketData: 'TIINGO' | 'FIXTURE';
   broker: string;
   mode: TradingMode;
@@ -780,4 +859,6 @@ export interface ProviderSummary {
   allReal: boolean;
   /** True when NORTHSTAR_USE_FIXTURES overrode otherwise-valid credentials. */
   forcedFixtures: boolean;
+  /** The manual-X experiment window, open or not. */
+  manual: ManualIngestWindow;
 }

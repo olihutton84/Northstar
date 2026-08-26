@@ -21,7 +21,26 @@ export interface ObservabilityPayload {
   at: string;
 
   providers: {
+    /** 'LIVE' | 'MANUAL' | 'FIXTURE'. MANUAL is never shown as LIVE. */
     x: string;
+    /**
+     * What to put on screen for the X row.
+     *
+     * Spelled out here rather than derived in the UI, so the console, the CLI
+     * and any Platform consumer all say the same thing about where the bot's
+     * information came from.
+     */
+    xLabel: string;
+    manual: {
+      active: boolean;
+      startedAt: string | null;
+      expiresAt: string | null;
+      hoursRemaining: number | null;
+      inactiveReason: string | null;
+      permitted: boolean;
+      permissionReason: string;
+      observations: { total: number; pending: number; ingested: number };
+    };
     marketData: string;
     broker: string;
     mode: string;
@@ -226,11 +245,25 @@ export interface ObservabilityPayload {
   }[];
 }
 
+/**
+ * How the X data source should be described, in words.
+ *
+ * "MANUAL REAL POSTS" rather than "X API LIVE" is the whole point: the posts
+ * are real, and the route they took to get here is not the API. Collapsing the
+ * two would misrepresent where the evidence came from.
+ */
+export function xDataLabel(x: string): string {
+  if (x === 'LIVE') return 'X API LIVE';
+  if (x === 'MANUAL') return 'MANUAL REAL POSTS';
+  return 'FIXTURE (not real data)';
+}
+
 export function buildObservability(app: NorthstarApp): ObservabilityPayload {
   const now = app.clock.nowIso();
   const nowMs = app.clock.nowMs();
   const strategyId = app.spec.strategyId;
   const autonomy = app.autonomy.evaluate();
+  const manualPermission = app.manualIngestPermission();
   const maxPositionCents = maxPositionCentsFor(
     app.epoch.capitalCents, app.spec.riskLimits.maxPositionPctOfEquity);
 
@@ -266,6 +299,17 @@ export function buildObservability(app: NorthstarApp): ObservabilityPayload {
 
     providers: {
       x: providers.x,
+      xLabel: xDataLabel(providers.x),
+      manual: {
+        active: providers.manual.active,
+        startedAt: providers.manual.startedAt,
+        expiresAt: providers.manual.expiresAt,
+        hoursRemaining: providers.manual.hoursRemaining,
+        inactiveReason: providers.manual.inactiveReason,
+        permitted: manualPermission.permitted,
+        permissionReason: manualPermission.reason,
+        observations: app.store.manual.counts(),
+      },
       marketData: providers.marketData,
       broker: providers.broker,
       mode: providers.mode,

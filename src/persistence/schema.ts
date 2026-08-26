@@ -9,7 +9,7 @@
  * caused it. Nothing is updated destructively except mutable working state
  * (position marks, order status, ledger cash); every decision is append-only.
  */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 export const SCHEMA_SQL = `
 PRAGMA journal_mode = WAL;
@@ -73,8 +73,14 @@ CREATE TABLE IF NOT EXISTS social_events (
   resolved_security_ids_json TEXT NOT NULL DEFAULT '[]',
   engagement_json      TEXT NOT NULL DEFAULT '{}',
   author_baseline_engagement REAL,
-  ingest_batch_id      TEXT NOT NULL
+  ingest_batch_id      TEXT NOT NULL,
+  -- Where the observation came from, and how it got here. An event that was
+  -- typed in by an operator must never be indistinguishable from one the API
+  -- returned, however identical its text.
+  source               TEXT NOT NULL DEFAULT 'X_API',
+  provenance           TEXT NOT NULL DEFAULT 'VENDOR_API'
 );
+CREATE INDEX IF NOT EXISTS idx_events_source ON social_events(source);
 CREATE INDEX IF NOT EXISTS idx_events_posted_at ON social_events(posted_at);
 CREATE INDEX IF NOT EXISTS idx_events_batch ON social_events(ingest_batch_id);
 CREATE INDEX IF NOT EXISTS idx_events_author ON social_events(author_id);
@@ -296,6 +302,48 @@ CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(strategy_id, status
 CREATE INDEX IF NOT EXISTS idx_positions_security ON positions(strategy_id, security_id, status);
 
 -- ----------------------------------------------------------------- ledger
+-- ---------------------------------------------------- manual X observations
+-- Real, public X posts transcribed by an operator during the temporary
+-- manual-ingest experiment. Deduplicated on post_id: the same post pasted
+-- twice, in any URL spelling, is one observation.
+CREATE TABLE IF NOT EXISTS manual_observations (
+  observation_id   TEXT PRIMARY KEY,
+  post_id          TEXT NOT NULL UNIQUE,
+  canonical_url    TEXT NOT NULL,
+  submitted_url    TEXT NOT NULL,
+  handle           TEXT NOT NULL,
+  display_name     TEXT NOT NULL,
+  text             TEXT NOT NULL,
+  posted_at        TEXT NOT NULL,
+  captured_at      TEXT NOT NULL,
+  submitted_by     TEXT NOT NULL,
+  source           TEXT NOT NULL DEFAULT 'X_MANUAL',
+  provenance       TEXT NOT NULL DEFAULT 'MANUAL_OPERATOR_SUPPLIED',
+  engagement_json  TEXT NOT NULL DEFAULT '{}',
+  follower_count   INTEGER,
+  verified         INTEGER NOT NULL DEFAULT 0,
+  note             TEXT NOT NULL DEFAULT '',
+  -- PENDING until a scan picks it up; INGESTED once it has become an event.
+  status           TEXT NOT NULL DEFAULT 'PENDING',
+  ingested_at      TEXT,
+  event_id         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_manual_status ON manual_observations(status, posted_at);
+
+-- The experiment window itself. One row per run; the expiry is NOT stored,
+-- it is computed from started_at and a ceiling that lives in code, so editing
+-- this table cannot extend the experiment.
+CREATE TABLE IF NOT EXISTS manual_ingest_windows (
+  window_id     TEXT PRIMARY KEY,
+  strategy_id   TEXT NOT NULL,
+  started_at    TEXT NOT NULL,
+  started_by    TEXT NOT NULL,
+  note          TEXT NOT NULL DEFAULT '',
+  ended_at      TEXT,
+  ended_reason  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_manual_windows ON manual_ingest_windows(strategy_id, started_at);
+
 -- ------------------------------------------------------- execution epochs
 -- An epoch is one clean run of capital. Capital is an EXECUTION setting and
 -- deliberately lives here rather than in the frozen strategy version, so the

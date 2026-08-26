@@ -15,11 +15,13 @@
  *   northstar api                print API usage and polling state
  *   northstar signals [n]        print recent signals with explanations
  *   northstar trace <id>         reconstruct one decision chain end to end
+ *   northstar manual <cmd>       operator-supplied X posts (start|add|batch|list|stop)
  *   northstar pause <reason>     stop new entries; exits keep running
  *   northstar kill <reason>      engage the kill switch
  *   northstar resume <note>      clear a pause/kill
  *   northstar mode PAPER|LIVE    set the trading mode
  */
+import { readFileSync } from 'node:fs';
 import { ConsoleLogger, formatSignedUsd, formatUsd, SystemClock } from '../core/index.js';
 import { loadEnv } from '../config/env.js';
 import { estimateDailyXRequests, type OperationsConfig } from '../config/operations.js';
@@ -92,6 +94,70 @@ function storageTag(verdict: StorageVerdict): string {
     case 'LIKELY_EPHEMERAL':
       return `${RED}LIKELY EPHEMERAL${RESET}`;
   }
+}
+
+/** Read a pasted batch from stdin. Empty when nothing is piped in. */
+async function readStdin(): Promise<string> {
+  if (process.stdin.isTTY) return '';
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+/**
+ * Report every submission individually.
+ *
+ * A batch that says only "7 accepted" leaves the operator to work out which
+ * three were not, and why — so each duplicate and each rejection is named.
+ */
+function printSubmitReport(report: import('../ingest/ManualIngestService.js').SubmitReport): void {
+  heading('MANUAL X SUBMISSION');
+  out(`${GREEN}${report.accepted} accepted${RESET} · ` +
+      `${report.duplicates ? YELLOW : DIM}${report.duplicates} duplicate${RESET} · ` +
+      `${report.rejected ? RED : DIM}${report.rejected} rejected${RESET}`);
+  out();
+
+  for (const outcome of report.outcomes) {
+    if (outcome.status === 'ACCEPTED') {
+      out(`${GREEN}ACCEPTED${RESET}  @${outcome.observation.handle} · ${outcome.observation.postedAt}`);
+      out(`${DIM}  ${outcome.observation.canonicalUrl}${RESET}`);
+    } else if (outcome.status === 'DUPLICATE') {
+      out(`${YELLOW}DUPLICATE${RESET} post ${outcome.postId} — already held since ${outcome.firstSeenAt}`);
+      out(`${DIM}  ${outcome.url}${RESET}`);
+      out(`${DIM}  Not stored again: one post is one observation, however many times it is pasted.${RESET}`);
+    } else {
+      out(`${RED}REJECTED${RESET}  ${outcome.url || '(no URL)'}`);
+      for (const problem of outcome.problems) out(`${RED}  - ${problem}${RESET}`);
+    }
+  }
+
+  if (report.windowClosed) {
+    out();
+    out(`${YELLOW}The manual-X experiment is not open, so these posts will NOT be traded.${RESET}`);
+    out(`${DIM}  ${report.window.inactiveReason ?? ''}${RESET}`);
+    out(`${DIM}  Open it with: northstar manual start "<note>"${RESET}`);
+  }
+}
+
+/** The experiment's state, and what it does and does not permit. */
+function printManualStatus(app: NorthstarApp): void {
+  const w = app.manualWindow();
+  const permission = app.manualIngestPermission();
+  const counts = app.store.manual.counts();
+
+  heading('MANUAL X INGEST');
+  out(`Experiment       ${w.active ? `${GREEN}OPEN${RESET}` : `${YELLOW}CLOSED${RESET}`}`);
+  if (w.startedAt) {
+    out(`Started          ${w.startedAt}${w.startedBy ? ` by ${w.startedBy}` : ''}`);
+    out(`Expires          ${w.expiresAt}${w.hoursRemaining !== null ? `  ${DIM}(${w.hoursRemaining}h left)${RESET}` : ''}`);
+  }
+  if (!w.active && w.inactiveReason) out(`${DIM}${w.inactiveReason}${RESET}`);
+  out(`Observations     ${counts.total} held · ${counts.pending} pending · ${counts.ingested} ingested`);
+  out(`Counts as real   ${permission.permitted ? `${GREEN}YES${RESET}` : `${RED}NO${RESET}`}  ${DIM}${permission.reason}${RESET}`);
+  out();
+  out(`${DIM}Add one:   northstar manual add --url <url> --at <ISO> --text "..."${RESET}`);
+  out(`${DIM}Add many:  pbpaste | northstar manual batch    (or --file posts.txt)${RESET}`);
+  out(`${DIM}           one per line:  <url> | <ISO timestamp> | <text>${RESET}`);
 }
 
 /**
@@ -729,6 +795,98 @@ async function main(): Promise<void> {
     }
 
     /*
+     * Manual X ingest — the temporary experiment.
+     *
+     * Reading from stdin as well as argv is what makes a paste workable: an
+     * operator copying several posts out of a browser should not have to shell-
+     * escape them.
+     */
+    case 'manual': {
+      const sub = args[0] ?? 'status';
+      const app = makeApp('PAPER');
+      app.seed();
+
+      switch (sub) {
+        case 'start': {
+          const note = args.slice(1).filter((a) => !a.startsWith('--')).join(' ');
+          const result = app.manualIngest.startExperiment(env.approverId, note);
+          out(result.detail);
+          if (result.started) {
+            out();
+            out(`${YELLOW}Trading has NOT been started. Run "npm start" when you want the bot to act.${RESET}`);
+          }
+          break;
+        }
+
+        case 'stop': {
+          const reason = args.slice(1).filter((a) => !a.startsWith('--')).join(' ') || 'Stopped from CLI';
+          const result = app.manualIngest.stopExperiment(reason);
+          out(result.stopped
+            ? 'Manual-X experiment closed. Operator-supplied posts no longer count as real data.'
+            : `No manual-X experiment is running. ${result.window.inactiveReason ?? ''}`);
+          break;
+        }
+
+        case 'add': {
+          const report = app.manualIngest.submit(
+            {
+              url: flag(args, '--url') ?? '',
+              text: flag(args, '--text') ?? '',
+              postedAt: flag(args, '--at') ?? '',
+              ...(flag(args, '--handle') ? { handle: flag(args, '--handle')! } : {}),
+              ...(flag(args, '--name') ? { displayName: flag(args, '--name')! } : {}),
+              ...(flag(args, '--likes') ? { likes: Number(flag(args, '--likes')) } : {}),
+              ...(flag(args, '--reposts') ? { reposts: Number(flag(args, '--reposts')) } : {}),
+              ...(flag(args, '--replies') ? { replies: Number(flag(args, '--replies')) } : {}),
+              ...(flag(args, '--quotes') ? { quotes: Number(flag(args, '--quotes')) } : {}),
+              ...(flag(args, '--impressions') ? { impressions: Number(flag(args, '--impressions')) } : {}),
+              ...(flag(args, '--followers') ? { followerCount: Number(flag(args, '--followers')) } : {}),
+            },
+            env.approverId,
+          );
+          printSubmitReport(report);
+          break;
+        }
+
+        case 'batch': {
+          const file = flag(args, '--file');
+          const raw = file ? readFileSync(file, 'utf8') : await readStdin();
+          if (raw.trim() === '') {
+            out('Nothing to read. Pipe posts in, or pass --file <path>.');
+            out('Each line: <url> | <ISO timestamp> | <text>   (or a JSON array)');
+            process.exitCode = 1;
+            break;
+          }
+          printSubmitReport(app.manualIngest.submitBatch(raw, env.approverId));
+          break;
+        }
+
+        case 'list': {
+          const observations = app.store.manual.recent(Number(args[1] ?? 25));
+          const counts = app.store.manual.counts();
+          heading('MANUAL X OBSERVATIONS');
+          out(`${counts.total} held · ${counts.pending} pending · ${counts.ingested} ingested`);
+          out();
+          for (const o of observations) {
+            out(`${o.status === 'PENDING' ? YELLOW : GREEN}${o.status.padEnd(8)}${RESET} ` +
+                `@${o.handle.padEnd(16)} ${o.postedAt}`);
+            out(`${DIM}  ${o.canonicalUrl}${RESET}`);
+            out(`  ${o.text.slice(0, 100)}${o.text.length > 100 ? '…' : ''}`);
+            if (o.eventId) out(`${DIM}  event ${o.eventId}${RESET}`);
+            out();
+          }
+          break;
+        }
+
+        default:
+          printManualStatus(app);
+      }
+
+      app.close();
+      break;
+    }
+
+    /*
      * PAUSE NEW ENTRIES — deliberately not a stop.
      *
      * Exits, fills and reconciliation keep running. A position nobody is
@@ -938,6 +1096,12 @@ function printHelp(): void {
   run                      the deployable process: trading loops + console
                            (this is what "npm start" runs)
   serve [--mode PAPER]     start the X Bot Console only
+  manual status            the manual-X experiment and what it permits
+  manual start "<note>"    OPEN the 7-day manual-X experiment (does not trade)
+  manual add --url U --at T --text "..."   submit one real X post
+  manual batch [--file f]  submit a pasted batch (stdin if no file)
+  manual list [n]          recent operator-supplied observations
+  manual stop "<reason>"   close the experiment early
   pause <reason>           PAUSE NEW ENTRIES; exits and reconciliation continue
   resume <note>            allow new entries again
   kill <reason>            EMERGENCY STOP; cancels open orders, keeps positions

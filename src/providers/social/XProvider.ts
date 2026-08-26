@@ -285,6 +285,8 @@ export class XProvider implements SocialDataProvider {
       resolvedSecurityIds: [],
       engagement,
       ingestBatchId: batchId,
+      source: 'X_API',
+      provenance: 'VENDOR_API',
     };
     if (tweet.lang) event.lang = tweet.lang;
     if (ref) event.referencedPostId = ref.id;

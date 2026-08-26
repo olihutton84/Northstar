@@ -125,6 +125,51 @@ export interface SocialEvent {
   authorBaselineEngagement?: number;
   /** Provider-assigned ingest batch, for replay. */
   ingestBatchId: string;
+  /**
+   * Where this observation came from.
+   *
+   * `X_MANUAL` is a real, public post transcribed by an operator during the
+   * temporary manual-ingest experiment. It is real data, but it is not API
+   * data, and the two must never be indistinguishable.
+   */
+  source: SocialEventSource;
+  provenance: SocialEventProvenance;
+}
+
+export type SocialEventSource = 'X_API' | 'X_MANUAL' | 'FIXTURE';
+export type SocialEventProvenance = 'VENDOR_API' | 'MANUAL_OPERATOR_SUPPLIED' | 'FIXTURE';
+
+/**
+ * A real X post supplied by hand rather than fetched.
+ *
+ * Kept as its own record, separate from the event it becomes, so the exact
+ * thing the operator pasted survives even after the pipeline has normalised,
+ * filtered and scored it — including the URL they typed, which is the audit
+ * anchor for any trade that follows.
+ */
+export interface ManualObservation {
+  observationId: string;
+  /** Canonical X status id. The deduplication key. */
+  postId: string;
+  canonicalUrl: string;
+  /** Exactly what was pasted, before canonicalisation. */
+  submittedUrl: string;
+  handle: string;
+  displayName: string;
+  text: string;
+  postedAt: string;
+  capturedAt: string;
+  submittedBy: string;
+  source: 'X_MANUAL';
+  provenance: 'MANUAL_OPERATOR_SUPPLIED';
+  engagement: EngagementMetrics;
+  followerCount: number | null;
+  verified: boolean;
+  note: string;
+  status: 'PENDING' | 'INGESTED';
+  ingestedAt: string | null;
+  /** The social event this became, once ingested. */
+  eventId: string | null;
 }
 
 /* -------------------------------------------------- filtering / resolution */

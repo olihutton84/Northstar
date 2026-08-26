@@ -10,6 +10,7 @@ reports without the Platform being reachable.
 
 - `x-signal-v1` — the strategy version, its weights, thresholds and freeze
 - X ingestion, filtering, entity resolution, deduplication
+- Manual X ingest (the temporary operator-supplied experiment)
 - Signal scoring and explanation
 - Tiingo price confirmation
 - The risk engine and virtual strategy capital (the execution-epoch ledger)
@@ -127,6 +128,48 @@ by genuinely being in `SIMULATION`.
 
 LIVE is decided first and by either witness — the broker's mode or the strategy
 mode — so a simulated broker running in LIVE mode still requires a human.
+
+## Manual X ingest — a temporary experiment
+
+The X API costs money. For a bounded experiment the operator supplies real,
+public X posts by hand: `src/ingest/`, `src/providers/social/ManualSocialProvider.ts`.
+
+```
+northstar manual start "<note>"     open the window (does NOT start trading)
+northstar manual add --url … --at … --text "…"
+pbpaste | northstar manual batch    one per line: <url> | <ISO ts> | <text>
+northstar manual list               what is held, pending and ingested
+northstar manual stop "<reason>"    close early; it expires on its own anyway
+```
+
+Manual posts route through the **existing** pipeline unchanged — event
+detection, ticker resolution, `x-signal-v1`, Tiingo confirmation, risk, Alpaca
+PAPER. Nothing downstream knows the evidence arrived through a person.
+
+| | |
+|---|---|
+| Source / provenance | `X_MANUAL` / `MANUAL_OPERATOR_SUPPLIED` |
+| Dedup key | canonical X status id, not the URL as typed |
+| Vendor cost | **0 requests** |
+| Window | **7 days**, ceiling in `MANUAL_INGEST_MAX_DAYS` |
+| LIVE | **never** — refused at provider construction *and* in the gate |
+
+Three properties make this safe rather than reckless:
+
+- **It is never presented as the API.** `describeProviders().x` is a third
+  state, `MANUAL`. The console reads **MANUAL REAL POSTS**, never *X API LIVE*.
+- **It expires by itself.** The expiry is computed from `startedAt` plus a
+  constant in code; it is deliberately NOT stored, so editing the row cannot
+  extend the experiment. Only a code change can.
+- **Every trade traces to a URL.** The observation keeps both the canonical URL
+  and the one actually pasted, plus who supplied it and when.
+
+Opening the window does not start trading, and submitting posts does not open
+the window. Both are explicit, separate acts.
+
+The social provider is chosen at construction, so opening the window while the
+bot is running has no effect until it restarts — the autonomy gate reports that
+case (`manual-provider-current`) rather than leaving the queue silently unread.
 
 ## Rules for future work in this repo
 

@@ -110,7 +110,20 @@ export class AutonomyGate {
     if (this.app.broker.mode === 'LIVE' || providers.mode === 'LIVE') return 'LIVE';
 
     const simulatedBroker = !providers.broker.startsWith('ALPACA');
-    const realData = providers.x === 'LIVE' && providers.marketData === 'TIINGO';
+
+    /*
+     * What counts as real X data.
+     *
+     * The API is real. An operator-supplied post is ALSO real — it is a public
+     * post that exists, transcribed rather than fetched — but only inside the
+     * temporary experiment window, and never in LIVE. That is an additional
+     * bounded acceptance, not a relaxation of the rule: fixtures remain
+     * categorically refused, the window expires on its own, and LIVE is
+     * refused twice over (here, and at provider construction).
+     */
+    const manual = this.app.manualIngestPermission();
+    const realX = providers.x === 'LIVE' || (providers.x === 'MANUAL' && manual.permitted);
+    const realData = realX && providers.marketData === 'TIINGO';
 
     if (simulatedBroker) {
       // Real data into a simulated broker is still simulation: nothing real is
@@ -164,13 +177,55 @@ export class AutonomyGate {
     // Only meaningful once a real broker is involved. In SIMULATION the whole
     // point is that the data is not real.
     const needsRealData = tier === 'PAPER' || tier === 'LIVE' || tier === 'INCOHERENT';
+    const manualPermission = this.app.manualIngestPermission();
     add(
       'live-x',
-      'X data is live',
-      !needsRealData || providers.x === 'LIVE',
+      'X data is real',
+      !needsRealData || providers.x === 'LIVE' || (providers.x === 'MANUAL' && manualPermission.permitted),
       providers.x === 'LIVE'
         ? 'The X provider is the real API.'
-        : 'LIVE X DATA REQUIRED — the fixture social provider is active.',
+        : providers.x === 'MANUAL'
+          ? manualPermission.permitted
+            ? `MANUAL REAL POSTS — operator-supplied. ${manualPermission.reason}`
+            : `Manual X posts are not usable: ${manualPermission.reason}`
+          : 'LIVE X DATA REQUIRED — the fixture social provider is active.',
+    );
+
+    /*
+     * An open window that this process cannot use.
+     *
+     * The social provider is chosen once, at construction, from the credentials
+     * and the window as they stood then. Opening the experiment while the bot is
+     * already running therefore changes nothing until it restarts — and without
+     * saying so, an operator would paste posts into a queue nobody is reading
+     * and watch nothing happen.
+     */
+    const windowOpenButUnused = providers.manual.active && providers.x === 'FIXTURE';
+    add(
+      'manual-provider-current',
+      'The running process is using the open manual window',
+      !windowOpenButUnused,
+      windowOpenButUnused
+        ? 'The manual-X experiment is open but this process started on fixtures and will not read the ' +
+          'queue. Restart the bot to pick it up.'
+        : 'Not applicable.',
+    );
+
+    /*
+     * Manual data must never reach LIVE.
+     *
+     * The tier check already blocks LIVE from acting alone, but this states the
+     * rule in its own right so it appears as its own failing gate rather than
+     * being inferred from another one. A rule an operator cannot see is a rule
+     * they cannot trust.
+     */
+    add(
+      'manual-not-live',
+      'Manual posts are not reaching LIVE',
+      !(providers.x === 'MANUAL' && tier === 'LIVE'),
+      providers.x === 'MANUAL' && tier === 'LIVE'
+        ? 'LIVE never accepts operator-supplied X posts. Refused outright, not held for approval.'
+        : 'Not applicable.',
     );
     add(
       'real-market-data',

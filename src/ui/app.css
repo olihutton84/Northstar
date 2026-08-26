@@ -75,6 +75,14 @@ main { max-width: 1500px; margin: 0 auto; padding: 24px; }
   margin-top: 12px; padding: 10px 14px; border-radius: var(--radius);
   background: rgba(229,72,77,0.12); border: 1px solid rgba(229,72,77,0.35); color: #ffb4b6;
 }
+/*
+ * Manual X ingest is not a fault, so it does not use the red banner — but it
+ * IS a temporary state the operator must not forget they are in, so it does not
+ * blend into the page either.
+ */
+.banner-manual {
+  background: rgba(77,141,255,0.12); border-color: rgba(77,141,255,0.4); color: #b8d0ff;
+}
 
 /* -------------------------------------------------------------- stats */
 
@@ -190,6 +198,8 @@ table.grid tbody tr.selected { background: rgba(77,141,255,0.12); }
 .health-cell.ok   { border-left-color: var(--good); }
 .health-cell.warn { border-left-color: var(--warn); }
 .health-cell.bad  { border-left-color: var(--bad); }
+/* Real data, but not the API: its own colour, neither "live" nor "broken". */
+.health-cell.manual { border-left-color: var(--accent); }
 .health-cell .k { color: var(--text-faint); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
 .health-cell .v { font-family: var(--mono); font-size: 14px; margin-top: 3px; }
 .health-cell .s { color: var(--text-faint); font-size: 10px; margin-top: 2px; }

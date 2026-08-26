@@ -141,6 +141,8 @@ export class FixtureSocialProvider implements SocialDataProvider {
           ...(p.impressions !== undefined ? { impressions: p.impressions } : {}),
         },
         ingestBatchId: batchId,
+      source: 'FIXTURE',
+      provenance: 'FIXTURE',
       };
       if (p.referencedPostId) event.referencedPostId = p.referencedPostId;
       if (p.baselineEngagement !== undefined) event.authorBaselineEngagement = p.baselineEngagement;

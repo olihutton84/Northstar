@@ -17,6 +17,8 @@ function event(over: Partial<SocialEvent> & { text: string }): SocialEvent {
   return {
     eventId: over.eventId ?? `evt-${Math.abs(hash(over.text))}`,
     platform: 'X',
+    source: 'FIXTURE',
+    provenance: 'FIXTURE',
     postId: over.postId ?? `post-${Math.abs(hash(over.text))}`,
     authorId: 'author-1',
     authorHandle: 'someone',

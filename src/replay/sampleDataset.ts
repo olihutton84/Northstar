@@ -90,6 +90,8 @@ export function buildSampleDataset(opts: SampleDatasetOptions = {}): ReplayDatas
     events.push({
       eventId: deterministicId('evt', 'X', spec.postId),
       platform: 'X',
+      source: 'FIXTURE',
+      provenance: 'FIXTURE',
       postId: spec.postId,
       authorId: author.authorId,
       authorHandle: author.handle,

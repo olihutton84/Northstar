@@ -122,6 +122,25 @@ export class Database {
         `);
       }
     }
+
+    if (before < 4) {
+      /*
+       * v4 adds provenance to social events.
+       *
+       * Everything already stored came from the vendor API or a fixture, and
+       * the column default says so. Backfilling it as manual would be a lie
+       * about where the evidence for those trades came from.
+       */
+      for (const [column, fallback] of [
+        ['source', 'X_API'],
+        ['provenance', 'VENDOR_API'],
+      ] as const) {
+        if (!this.hasColumn('social_events', column)) {
+          this.raw.exec(
+            `ALTER TABLE social_events ADD COLUMN ${column} TEXT NOT NULL DEFAULT '${fallback}'`);
+        }
+      }
+    }
   }
 
   private hasColumn(table: string, column: string): boolean {

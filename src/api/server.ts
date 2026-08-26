@@ -304,6 +304,58 @@ export class ApiServer {
       this.sendJson(res, 200, { strategy, cancelled, liquidate: b.liquidate === true });
     });
 
+    /* --- manual X ingest (the temporary experiment) ---------------------- */
+
+    r('GET', /^\/api\/manual$/, (_req, res) => {
+      this.sendJson(res, 200, {
+        window: this.app.manualWindow(),
+        permission: this.app.manualIngestPermission(),
+        counts: this.app.store.manual.counts(),
+        observations: this.app.store.manual.recent(50),
+      });
+    });
+
+    /*
+     * Submit posts. Accepts one, several, or a pasted blob.
+     *
+     * This fills a queue; it does not start trading and it does not open the
+     * experiment. Both of those are separate, explicit acts.
+     */
+    r('POST', /^\/api\/manual\/posts$/, (_req, res, _params, body) => {
+      const b = (body ?? {}) as { post?: unknown; posts?: unknown[]; batch?: string };
+      const by = this.approverId;
+
+      if (typeof b.batch === 'string') {
+        return this.sendJson(res, 200, this.app.manualIngest.submitBatch(b.batch, by));
+      }
+      if (Array.isArray(b.posts)) {
+        return this.sendJson(res, 200, this.app.manualIngest.submitMany(b.posts as never[], by));
+      }
+      if (b.post && typeof b.post === 'object') {
+        return this.sendJson(res, 200, this.app.manualIngest.submit(b.post as never, by));
+      }
+      return this.sendJson(res, 400, {
+        error: 'Send { post }, { posts: [...] } or { batch: "<pasted text>" }.',
+      });
+    });
+
+    r('POST', /^\/api\/manual\/start$/, (_req, res, _params, body) => {
+      const b = (body ?? {}) as { note?: string };
+      const result = this.app.manualIngest.startExperiment(this.approverId, b.note ?? '');
+      this.sendJson(res, result.started ? 200 : 409, {
+        ...result,
+        // Said explicitly, because opening a window and starting a bot are
+        // easy to conflate and only one of them places orders.
+        tradingStarted: false,
+      });
+    });
+
+    r('POST', /^\/api\/manual\/stop$/, (_req, res, _params, body) => {
+      const b = (body ?? {}) as { reason?: string };
+      const result = this.app.manualIngest.stopExperiment(b.reason ?? 'Stopped from the X Bot Console');
+      this.sendJson(res, result.stopped ? 200 : 409, result);
+    });
+
     /*
      * PAUSE NEW ENTRIES. Not a stop.
      *

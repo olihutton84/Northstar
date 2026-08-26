@@ -87,6 +87,19 @@ export interface HarnessOptions {
   /** Supply a platform universe snapshot instead of the bot fallback. */
   universeSource?: UniverseSource | null;
   /**
+   * Let the app choose its own social provider instead of injecting fixtures.
+   *
+   * Used to exercise the REAL provider-selection path — the one that picks the
+   * manual provider when the experiment is open and there is no API key.
+   * Injecting a provider would bypass exactly the logic under test.
+   *
+   * Selection happens at construction, so a manual run needs the window already
+   * open in a database the app can read: pair this with `databasePath`, exactly
+   * as production does when `manual start` and `npm start` are separate
+   * processes against the same file.
+   */
+  selectSocialProvider?: boolean;
+  /**
    * Back the database with a file instead of memory.
    *
    * Required to simulate a restart: an in-memory database dies with the
@@ -125,11 +138,16 @@ export function createHarness(opts: HarnessOptions = {}): Harness {
   });
 
   const app = new NorthstarApp({
-    env: testEnv({ liveTradingEnabled: opts.liveTradingEnabled ?? false }),
+    env: testEnv({
+      liveTradingEnabled: opts.liveTradingEnabled ?? false,
+      // Fixtures forced would short-circuit selection before it ever considers
+      // the manual provider.
+      ...(opts.selectSocialProvider ? { useFixtures: false } : {}),
+    }),
     clock,
     logger,
     mode: opts.mode ?? 'PAPER',
-    social,
+    ...(opts.selectSocialProvider ? {} : { social }),
     marketData,
     broker,
     databasePath: opts.databasePath ?? ':memory:',

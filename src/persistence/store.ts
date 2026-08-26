@@ -12,6 +12,7 @@ import type {
   DecisionLogEntry,
   DecisionStage,
   ExecutionEpoch,
+  ManualObservation,
   Fill,
   FilterResult,
   HealthIncident,
@@ -35,6 +36,7 @@ import type {
 } from '../domain/types.js';
 import type { Database, Row } from './db.js';
 import { boolToInt, intToBool, jsonParse, nullableBool, numOrNull, strOrNull, toJson } from './db.js';
+import type { StoredManualWindow } from '../config/manualIngest.js';
 
 /* ------------------------------------------------------------ securities */
 
@@ -167,12 +169,13 @@ export class SocialEventRepo {
       `INSERT INTO social_events (event_id, platform, post_id, author_id, author_handle, author_display_name,
          source_class, source_tier, posted_at, captured_at, text, url, lang, kind, referenced_post_id,
          mentioned_cashtags_json, mentioned_companies_json, resolved_security_ids_json, engagement_json,
-         author_baseline_engagement, ingest_batch_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         author_baseline_engagement, ingest_batch_id, source, provenance)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       e.eventId, e.platform, e.postId, e.authorId, e.authorHandle, e.authorDisplayName,
       e.sourceClass, e.sourceTier, e.postedAt, e.capturedAt, e.text, e.url, e.lang ?? null, e.kind,
       e.referencedPostId ?? null, toJson(e.mentionedCashtags), toJson(e.mentionedCompanies),
       toJson(e.resolvedSecurityIds), toJson(e.engagement), e.authorBaselineEngagement ?? null, e.ingestBatchId,
+      e.source, e.provenance,
     );
     return true;
   }
@@ -204,6 +207,8 @@ export class SocialEventRepo {
       engagement: jsonParse(r['engagement_json'], { likes: 0, reposts: 0, replies: 0, quotes: 0 }),
       authorBaselineEngagement: numOrNull(r['author_baseline_engagement']) ?? undefined,
       ingestBatchId: String(r['ingest_batch_id']),
+      source: String(r['source'] ?? 'X_API') as SocialEvent['source'],
+      provenance: String(r['provenance'] ?? 'VENDOR_API') as SocialEvent['provenance'],
     };
   }
 
@@ -949,6 +954,149 @@ export class PositionRepo {
   }
 }
 
+/* --------------------------------------------------- manual X observations */
+
+/**
+ * Operator-supplied X posts.
+ *
+ * Deduplicated on `post_id`, which is the canonical X status id rather than the
+ * URL as typed: the same post reachable as x.com, twitter.com or with a
+ * tracking parameter is ONE observation. Without that, the same post pasted
+ * twice would look like two independent sources corroborating each other, which
+ * is precisely the thing the signal engine rewards.
+ */
+export class ManualObservationRepo {
+  constructor(private readonly db: Database) {}
+
+  /** Insert, or report that this post is already held. */
+  add(o: ManualObservation): { inserted: boolean; existing: ManualObservation | null } {
+    const existing = this.byPostId(o.postId);
+    if (existing) return { inserted: false, existing };
+
+    this.db.run(
+      `INSERT INTO manual_observations (observation_id, post_id, canonical_url, submitted_url, handle,
+         display_name, text, posted_at, captured_at, submitted_by, source, provenance, engagement_json,
+         follower_count, verified, note, status, ingested_at, event_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(post_id) DO NOTHING`,
+      o.observationId, o.postId, o.canonicalUrl, o.submittedUrl, o.handle,
+      o.displayName, o.text, o.postedAt, o.capturedAt, o.submittedBy, o.source, o.provenance,
+      toJson(o.engagement), o.followerCount, boolToInt(o.verified), o.note, o.status,
+      o.ingestedAt, o.eventId,
+    );
+    return { inserted: this.byPostId(o.postId) !== null, existing: null };
+  }
+
+  byPostId(postId: string): ManualObservation | null {
+    const r = this.db.get('SELECT * FROM manual_observations WHERE post_id = ?', postId);
+    return r ? ManualObservationRepo.map(r) : null;
+  }
+
+  byId(observationId: string): ManualObservation | null {
+    const r = this.db.get('SELECT * FROM manual_observations WHERE observation_id = ?', observationId);
+    return r ? ManualObservationRepo.map(r) : null;
+  }
+
+  /** Observations not yet turned into events, oldest post first. */
+  pending(limit = 200): ManualObservation[] {
+    return this.db
+      .all("SELECT * FROM manual_observations WHERE status = 'PENDING' ORDER BY posted_at LIMIT ?", limit)
+      .map(ManualObservationRepo.map);
+  }
+
+  recent(limit = 100): ManualObservation[] {
+    return this.db
+      .all('SELECT * FROM manual_observations ORDER BY captured_at DESC LIMIT ?', limit)
+      .map(ManualObservationRepo.map);
+  }
+
+  markIngested(observationId: string, eventId: string, at: string): void {
+    this.db.run(
+      "UPDATE manual_observations SET status = 'INGESTED', event_id = ?, ingested_at = ? WHERE observation_id = ?",
+      eventId, at, observationId,
+    );
+  }
+
+  counts(): { total: number; pending: number; ingested: number } {
+    const row = this.db.get<{ total: number; pending: number; ingested: number }>(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN status = 'PENDING'  THEN 1 ELSE 0 END) AS pending,
+              SUM(CASE WHEN status = 'INGESTED' THEN 1 ELSE 0 END) AS ingested
+       FROM manual_observations`);
+    return {
+      total: Number(row?.total ?? 0),
+      pending: Number(row?.pending ?? 0),
+      ingested: Number(row?.ingested ?? 0),
+    };
+  }
+
+  private static map(r: Row): ManualObservation {
+    return {
+      observationId: String(r['observation_id']),
+      postId: String(r['post_id']),
+      canonicalUrl: String(r['canonical_url']),
+      submittedUrl: String(r['submitted_url']),
+      handle: String(r['handle']),
+      displayName: String(r['display_name']),
+      text: String(r['text']),
+      postedAt: String(r['posted_at']),
+      capturedAt: String(r['captured_at']),
+      submittedBy: String(r['submitted_by']),
+      source: 'X_MANUAL',
+      provenance: 'MANUAL_OPERATOR_SUPPLIED',
+      engagement: jsonParse<ManualObservation['engagement']>(
+        r['engagement_json'], { likes: 0, reposts: 0, replies: 0, quotes: 0 }),
+      followerCount: numOrNull(r['follower_count']),
+      verified: intToBool(r['verified']),
+      note: String(r['note'] ?? ''),
+      status: String(r['status']) as ManualObservation['status'],
+      ingestedAt: strOrNull(r['ingested_at']),
+      eventId: strOrNull(r['event_id']),
+    };
+  }
+}
+
+/**
+ * The manual-ingest experiment window.
+ *
+ * The expiry is deliberately absent from storage: it is computed from
+ * `started_at` and a ceiling in code, so no edit here can lengthen the
+ * experiment.
+ */
+export class ManualWindowRepo {
+  constructor(private readonly db: Database) {}
+
+  start(strategyId: string, startedAt: string, startedBy: string, note: string): void {
+    this.db.run(
+      `INSERT INTO manual_ingest_windows (window_id, strategy_id, started_at, started_by, note)
+       VALUES (?, ?, ?, ?, ?)`,
+      deterministicId('mwin', strategyId, startedAt), strategyId, startedAt, startedBy, note,
+    );
+  }
+
+  /** The most recent window, running or not. */
+  latest(strategyId: string): StoredManualWindow | null {
+    const r = this.db.get(
+      'SELECT * FROM manual_ingest_windows WHERE strategy_id = ? ORDER BY started_at DESC', strategyId);
+    if (!r) return null;
+    return {
+      startedAt: String(r['started_at']),
+      endedAt: strOrNull(r['ended_at']),
+      endedReason: strOrNull(r['ended_reason']),
+      startedBy: String(r['started_by']),
+      note: String(r['note'] ?? ''),
+    };
+  }
+
+  stop(strategyId: string, at: string, reason: string): void {
+    this.db.run(
+      `UPDATE manual_ingest_windows SET ended_at = ?, ended_reason = ?
+       WHERE strategy_id = ? AND ended_at IS NULL`,
+      at, reason, strategyId,
+    );
+  }
+}
+
 /* ------------------------------------------------------- execution epochs */
 
 /**
@@ -1606,6 +1754,8 @@ export class Store {
   readonly apiUsage: ApiUsageRepo;
   readonly cursors: CursorRepo;
   readonly epochs: EpochRepo;
+  readonly manual: ManualObservationRepo;
+  readonly manualWindows: ManualWindowRepo;
 
   constructor(readonly db: Database, readonly clock: Clock) {
     this.securities = new SecurityRepo(db);
@@ -1630,6 +1780,8 @@ export class Store {
     this.apiUsage = new ApiUsageRepo(db);
     this.cursors = new CursorRepo(db, clock);
     this.epochs = new EpochRepo(db);
+    this.manual = new ManualObservationRepo(db);
+    this.manualWindows = new ManualWindowRepo(db);
   }
 
   close(): void {

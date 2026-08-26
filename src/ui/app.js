@@ -291,7 +291,12 @@ function renderHealth() {
     : health.strategy.runState === 'KILLED' ? 'bad' : 'warn';
 
   body.innerHTML = `<div class="health-grid">
-    ${cell('X provider', p.x, p.x === 'LIVE' ? 'ok' : 'warn', p.ids.social)}
+    ${cell('X data', p.xLabel, p.x === 'LIVE' ? 'ok' : p.x === 'MANUAL' ? 'manual' : 'warn',
+      p.x === 'MANUAL'
+        ? (p.manual.active
+            ? `operator-supplied · ${p.manual.observations.ingested} ingested · ${p.manual.hoursRemaining}h of experiment left`
+            : esc(p.manual.inactiveReason || 'experiment closed'))
+        : p.ids.social)}
     ${cell('Market data', p.marketData, p.marketData === 'TIINGO' ? 'ok' : 'warn', p.ids.marketData)}
     ${cell('Broker', p.broker, p.broker.startsWith('ALPACA') ? 'ok' : 'warn', p.ids.broker)}
     ${cell('Mode', p.mode, p.mode === 'LIVE' ? 'warn' : 'ok', `strategy ${health.strategy.version}`)}
@@ -339,6 +344,14 @@ function renderHealth() {
       health.killSwitch.openIncidents.length ? 'bad' : 'ok',
       health.killSwitch.openIncidents[0]?.fault ?? 'none')}
   </div>
+  ${p.x === 'MANUAL' ? `<div class="banner banner-manual" style="margin-top:12px">
+      X DATA: MANUAL REAL POSTS — operator-supplied, not the X API.
+      <div style="margin-top:6px;opacity:.85;font-weight:normal">
+        ${p.manual.active
+          ? `Every trade traces back to a URL you supplied. Experiment expires ${esc(p.manual.expiresAt || '')} (${p.manual.hoursRemaining}h left).`
+          : esc(p.manual.inactiveReason || 'The manual-X experiment is closed.')}
+      </div>
+    </div>` : ''}
   ${!a.enabled ? `<div class="banner" style="margin-top:12px">
       AUTONOMOUS EXECUTION: BLOCKED<br>REASON: ${esc(blockHeadline(a))}
       ${a.checks.filter((c) => !c.passed).length > 1
