@@ -7,7 +7,7 @@
  * pointing at the behaviour that actually produced them. Rewriting a published
  * version in place would silently falsify every backtest that references it.
  */
-import { dollarsToCents } from '../core/index.js';
+import { dollarsToCents, shortHash } from '../core/index.js';
 import type { RiskLimits, UniverseSource } from '../domain/types.js';
 import { SIGNAL_CONFIG_V1 } from './signalConfig.js';
 
@@ -105,6 +105,47 @@ export const X_SIGNAL_V1: StrategyVersionSpec = {
 const VERSIONS = new Map<string, StrategyVersionSpec>([
   [`${X_SIGNAL_V1.strategyId}@${X_SIGNAL_V1.version}`, X_SIGNAL_V1],
 ]);
+
+/**
+ * The frozen fingerprint of v1.
+ *
+ * `x-signal-v1` is frozen as of the first real-data paper session. Its weights,
+ * thresholds, risk limits, exit rules and universe are the behaviour every
+ * stored signal and trade was produced by, and every comparison baseline is
+ * measured against.
+ *
+ * The fingerprint is asserted by a test. If you change v1 and that test fails,
+ * the fix is NOT to update this constant — it is to publish `x-signal-v2` with
+ * your change and leave v1 alone, so the record of what actually traded stays
+ * true. The single exception is a genuine correctness or safety bug in v1, in
+ * which case the fingerprint moves deliberately and the changelog says why.
+ *
+ * Operational cadence lives in OperationsConfig and is deliberately NOT part of
+ * this fingerprint: how often the bot looks is not what it believes.
+ */
+export const X_SIGNAL_V1_FINGERPRINT = 'b45f2bbd5224201a';
+
+/** Stable content hash of a published version, used to police the freeze. */
+export function fingerprintVersion(spec: StrategyVersionSpec): string {
+  return shortHash(
+    JSON.stringify({
+      strategyId: spec.strategyId,
+      version: spec.version,
+      signalConfigId: spec.signalConfigId,
+      allocatedCapitalCents: spec.allocatedCapitalCents,
+      benchmarkTicker: spec.benchmarkTicker,
+      universeSources: [...spec.universeSources].sort(),
+      riskLimits: sortedEntries(spec.riskLimits),
+      exitRules: sortedEntries(spec.exitRules),
+      signalConfig: sortedEntries(SIGNAL_CONFIG_V1),
+    }),
+  );
+}
+
+/** Key order must not affect the fingerprint, or a refactor would break it. */
+function sortedEntries(o: object): [string, unknown][] {
+  return Object.entries(o).sort(([a], [b]) => a.localeCompare(b));
+}
 
 export function versionKey(strategyId: string, version: string): string {
   return `${strategyId}@${version}`;

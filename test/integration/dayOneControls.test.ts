@@ -449,3 +449,123 @@ describe('session transitions', () => {
     assert.deepEqual(days, []);
   });
 });
+
+/* ------------------------------------------------------- restart recovery */
+
+describe('restart recovery', () => {
+  it('resumes from the stored cursor instead of re-reading the window', async () => {
+    const { openDatabase } = await import('../../src/persistence/db.js');
+    const { Store } = await import('../../src/persistence/store.js');
+
+    // A cursor written by a previous process.
+    const clock = new FixedClock('2026-03-10T15:00:00.000Z');
+    const db = openDatabase(':memory:');
+    const store = new Store(db, clock);
+    store.cursors.advance('x:chunk:0', '1900000000000000000');
+
+    // A fresh process reads it back and hands it to the provider unchanged.
+    const reopened = new Store(db, clock);
+    assert.deepEqual(reopened.cursors.all('x:'), { 'x:chunk:0': '1900000000000000000' });
+    db.close();
+  });
+
+  it('keeps the API usage for the day across a restart', async () => {
+    const { openDatabase } = await import('../../src/persistence/db.js');
+    const { Store } = await import('../../src/persistence/store.js');
+    const { ApiMeter } = await import('../../src/runtime/ApiMeter.js');
+
+    const clock = new FixedClock('2026-03-10T15:00:00.000Z');
+    const db = openDatabase(':memory:');
+    const store = new Store(db, clock);
+
+    const before = new ApiMeter(store, clock, { x: 400 });
+    for (let i = 0; i < 25; i += 1) before.record('x', 'SUCCESS');
+
+    // A restart must not hand the bot a fresh request budget: usage is per
+    // UTC day, not per process.
+    const after = new ApiMeter(new Store(db, clock), clock, { x: 400 });
+    assert.equal(after.usage('x').requests, 25);
+    db.close();
+  });
+
+  it('does not re-signal stored events after a restart', async () => {
+    const h = createHarness({ posts: [bullishTier1Post(), corroboratingTier2Post()] });
+    const first = await h.app.runner.runCycle();
+    assert.equal(first.signalsGenerated, 1);
+
+    // The same database, a new process: the events are stored and already
+    // signalled, so nothing new may be produced from them.
+    h.clock.advanceMinutes(5);
+    const second = await h.app.runner.runCycle();
+    assert.equal(second.signalsGenerated, 0);
+    h.close();
+  });
+});
+
+/* --------------------------------------------------- observability payload */
+
+describe('monitoring payload', () => {
+  it('answers the day-one questions above the fold', async () => {
+    const { buildObservability } = await import('../../src/api/observability.js');
+    const h = createHarness({ posts: [bullishTier1Post(), corroboratingTier2Post()] });
+    await h.app.runner.runCycle();
+
+    const o = buildObservability(h.app);
+
+    // Everything an operator needs before scrolling.
+    assert.equal(typeof o.summary.connected, 'boolean');
+    // A strong new signal just landed, so the poller is on the faster cadence
+    // for a short window — which is exactly when follow-up news arrives.
+    assert.equal(o.summary.pollingState, 'EVENT_WATCH');
+    assert.equal(o.summary.nextScanSeconds, 60);
+    assert.equal(o.eventWatch[0]?.ticker, 'NVDA');
+    assert.ok(o.summary.lastPostSeenAt !== null, 'the newest post seen is reported');
+    assert.equal(o.summary.tradesToday, 1);
+    assert.equal(o.summary.openPositions, 1);
+    assert.equal(o.summary.killSwitch, false);
+    assert.equal(o.summary.runState, 'RUNNING');
+
+    // The three cadences are stated, not implied.
+    assert.equal(o.cadence.xScanSeconds, 120);
+    assert.equal(o.cadence.positionMonitorSeconds, 60);
+    assert.equal(o.cadence.reconciliationSeconds, 180);
+    assert.ok(o.cadence.estimatedDailyXRequests > 0);
+
+    h.close();
+  });
+
+  it('shows each ingested post with the pipeline verdict on it', async () => {
+    const { buildObservability } = await import('../../src/api/observability.js');
+    const h = createHarness({ posts: [bullishTier1Post(), corroboratingTier2Post(), ...noisePosts()] });
+    await h.app.runner.runCycle();
+
+    const o = buildObservability(h.app);
+    assert.ok(o.feed.length >= 3, 'every ingested post appears in the feed');
+
+    // A rejected post must show WHY, or a quiet day is unexplainable.
+    const rejected = o.feed.find((f) => f.verdict === 'REJECT');
+    assert.ok(rejected, 'noise was rejected');
+    assert.ok(rejected!.verdictReasons.length > 0, 'the rejection carries its reasons');
+
+    const traded = o.feed.find((f) => f.signalId !== null);
+    assert.ok(traded, 'the post that produced a signal is linked to it');
+    assert.ok(traded!.resolvedTickers.includes('NVDA'));
+
+    h.close();
+  });
+
+  it('reports API telemetry for all three vendors, with no credential in it', async () => {
+    const { buildObservability } = await import('../../src/api/observability.js');
+    const h = createHarness({ posts: [bullishTier1Post(), corroboratingTier2Post()] });
+    await h.app.runner.runCycle();
+
+    const o = buildObservability(h.app);
+    assert.deepEqual(o.api.map((a) => a.provider).sort(), ['alpaca', 'tiingo', 'x']);
+
+    const serialised = JSON.stringify(o.api);
+    for (const secret of ['Bearer', 'APCA', 'token=', 'secret']) {
+      assert.ok(!serialised.includes(secret), `API telemetry must not contain "${secret}"`);
+    }
+    h.close();
+  });
+});

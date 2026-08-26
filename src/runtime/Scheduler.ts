@@ -57,6 +57,11 @@ export interface SchedulerOptions {
   maxScans?: number;
 }
 
+interface StartOptions {
+  /** Overrides `maxScans` for this run. */
+  maxScans?: number;
+}
+
 export interface SchedulerStatus {
   running: boolean;
   startedAt: string | null;
@@ -80,6 +85,8 @@ export class Scheduler {
   private stopRequested = false;
 
   private scans = 0;
+  /** Effective scan bound for the current run. */
+  private scanLimit: number | undefined;
   private monitors = 0;
   private reconciliations = 0;
   private lastScanAt: string | null = null;
@@ -138,7 +145,7 @@ export class Scheduler {
 
   private async xScanLoop(): Promise<void> {
     while (!this.stopRequested) {
-      if (this.o.maxScans !== undefined && this.scans >= this.o.maxScans) return;
+      if (this.scanLimit !== undefined && this.scans >= this.scanLimit) return;
 
       const report = await this.run(() => this.scanOnce());
       if (report) {
@@ -150,7 +157,7 @@ export class Scheduler {
       }
 
       if (this.stopRequested) return;
-      if (this.o.maxScans !== undefined && this.scans >= this.o.maxScans) return;
+      if (this.scanLimit !== undefined && this.scans >= this.scanLimit) return;
 
       const seconds = this.o.polling.nextIntervalSeconds();
       this.log.debug('next X scan', { seconds, state: this.o.polling.status().state });
@@ -275,12 +282,13 @@ export class Scheduler {
 
   /* ------------------------------------------------------------ control */
 
-  /** Run all three loops until `stop()` or `maxScans`. */
-  async start(): Promise<void> {
+  /** Run all three loops until `stop()` or the scan bound is reached. */
+  async start(opts: StartOptions = {}): Promise<void> {
     if (this.running) throw new Error('Scheduler is already running.');
     this.running = true;
     this.stopRequested = false;
     this.startedAt = this.o.clock.nowIso();
+    this.scanLimit = opts.maxScans ?? this.o.maxScans;
 
     this.o.session?.prime();
 

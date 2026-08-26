@@ -150,7 +150,8 @@ async function main(): Promise<void> {
       // is how a bot ends up either burning its X quota or checking a
       // stop-loss every fifteen minutes.
       const intervalFlag = flag(args, '--interval');
-      const maxScans = Number(flag(args, '--cycles') ?? Infinity);
+      const cyclesFlag = flag(args, '--cycles');
+      const maxScans = cyclesFlag === undefined ? undefined : Number(cyclesFlag);
       const app = makeApp('PAPER', intervalFlag === undefined ? {} : { xScanIntervalSeconds: Number(intervalFlag) });
       app.seed();
       app.setMode('PAPER');
@@ -175,8 +176,10 @@ async function main(): Promise<void> {
         app.scheduler.stop();
       });
 
+      if (maxScans !== undefined) out(`Bounded run: stopping after ${maxScans} X scan(s).`);
+
       app.scheduler.startSupportLoops();
-      await app.scheduler.start();
+      await app.scheduler.start(maxScans === undefined ? {} : { maxScans });
 
       out();
       out(app.dailyReport.render(app.dailyReport.build()));

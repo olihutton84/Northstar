@@ -26,11 +26,83 @@ records positions, closes them per the exit rules and records outcomes — with 
 manual intervention.
 
 ```bash
-npm run paper -- --interval 15      # a cycle every 15 minutes
-npm run paper -- --interval 15 --cycles 100
+npm run paper                        # default cadences (recommended)
+npm run paper -- --interval 120      # X scan every 120 seconds
+npm run paper -- --interval 120 --cycles 100
 ```
 
 Or drive it from the dashboard's **Run cycle** button.
+
+### Three loops, three cadences
+
+`--interval` sets the **X scan** cadence in **seconds**, and nothing else. The
+other two loops run on their own cadences, because they are driven by different
+things:
+
+| Loop | Default | What it does | Costs X requests |
+|---|---|---|---|
+| X scan | 120s | ingest, filter, resolve, signal, propose, risk, execute | yes |
+| Position monitor | 60s | mark to market, evaluate exits, reconcile fills | no |
+| Reconciliation | 180s | compare broker truth with local truth | no |
+
+Reconciliation also runs **immediately** after any order event rather than
+waiting for its next slot.
+
+Collapsing these into one interval is wrong in both directions at once: fast
+enough to watch a stop-loss burns the X budget on scans that return nothing, and
+slow enough to be polite to X leaves capital unmonitored for minutes.
+
+### Adaptive X polling
+
+The scan cadence moves between three states:
+
+| State | Cadence | When |
+|---|---|---|
+| `NORMAL` | 120s | baseline |
+| `EVENT_WATCH` | 60s | a strong new signal landed; held for 12 minutes |
+| `API_PRESSURE` | 300s+ | a 429, low advertised headroom, or the daily soft cap |
+
+After a 429 the backoff doubles per consecutive rate limit up to 15 minutes, and
+honours the vendor's own `Retry-After` when it asks for longer. Pressure always
+beats event watch: polling faster into a rate limit during the one window that
+matters is how a session is lost.
+
+A faster cadence never means more trades. Duplicate suppression, the
+same-ticker cooldown and the signal TTL bound that independently.
+
+### Cadence and rate controls
+
+Every value is overridable by environment variable, and none of them is part of
+the frozen strategy version:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `NORTHSTAR_X_SCAN_SECONDS` | 120 | baseline X scan cadence |
+| `NORTHSTAR_X_EVENT_WATCH_SECONDS` | 60 | cadence while a story develops |
+| `NORTHSTAR_X_EVENT_WATCH_MINUTES` | 12 | how long a watch lasts |
+| `NORTHSTAR_X_PRESSURE_SECONDS` | 300 | cadence under API pressure |
+| `NORTHSTAR_X_DAILY_SOFT_CAP` | 400 | request budget before slowing down |
+| `NORTHSTAR_POSITION_MONITOR_SECONDS` | 60 | mark/exit/fill cadence |
+| `NORTHSTAR_RECONCILE_SECONDS` | 180 | broker reconciliation cadence |
+| `NORTHSTAR_QUOTE_CACHE_SECONDS` | 45 | quote reuse window |
+| `NORTHSTAR_HISTORY_REFRESH_MINUTES` | 60 | bar-history reuse window |
+| `NORTHSTAR_TICKER_COOLDOWN_MINUTES` | 30 | minimum gap between entries in one name |
+| `NORTHSTAR_SIGNAL_TTL_MINUTES` | 45 | maximum evidence age at execution |
+| `NORTHSTAR_PROPOSAL_TTL_MINUTES` | 15 | maximum age of unactioned proposal terms |
+
+### Expected X usage
+
+At the defaults, roughly **215 requests** across a 6.5-hour session: about 195
+baseline scans plus the event-watch fraction, one batched query each. Cursors
+mean each scan asks for posts *newer than the last one seen* rather than
+re-downloading the window, so the cost does not grow with the size of the
+universe's recent history.
+
+Check it during the day:
+
+```bash
+npm run api        # requests, rate-limit headroom, polling state
+```
 
 Every run opens with a provider banner stating exactly what is wired up:
 
@@ -61,14 +133,41 @@ deliberately.
 
 ```bash
 npm run status                     # providers, run state, ledger, open positions
+npm run api                        # API usage, rate-limit headroom, polling state
+npm run funnel                     # where the day stopped, stage by stage
 npm run lab -- signals 10          # recent signals, fully explained
+npm run eod                        # end-of-day report
 npm run report -- 1d               # paper-qualification report
 npm run lab -- trace <proposalId>  # the whole decision chain
 ```
 
-Dashboard sections: header status, **Bot Equity vs Benchmark**, live signal feed
-with per-signal explanation, trade proposals, open positions, recent trades,
-signal performance, source analytics, and risk.
+Dashboard sections, top to bottom: **Right Now** (connected, polling state, next
+scan, newest post seen, X budget, trades today, market open, kill switch),
+system health, **Bot Equity vs Benchmark**, live signal feed with per-signal
+explanation, trade proposals, open positions, recent trades, signal performance,
+source analytics, **API Usage Today**, **Today's Funnel**, **Live X Feed**, and
+risk.
+
+### Reading a quiet day
+
+`npm run funnel` turns "nothing happened" into a specific answer:
+
+```
+  X requests              214
+  Posts received           38
+  Posts stored (new)       31
+  Posts accepted            4
+  Material events           2
+  Signals generated         0     <- stopped here
+```
+
+Each stage carries what a zero at that stage means. Zero X requests is a
+credential or loop problem; posts but no accepted posts is a filter question;
+signals but no proposals is a threshold; proposals but no orders is risk.
+
+**A funnel that narrows to zero is a normal outcome, not a fault.** There is no
+minimum trade count, daily quota or forced entry anywhere in the bot, and a day
+with zero trades is a complete, correct day.
 
 ## Stopping it
 
@@ -98,6 +197,25 @@ incident. The common ones:
 
 A paused strategy keeps observing and recording. Resuming clears open incidents
 and resets the failure counters.
+
+## A trading day, start to finish
+
+Start it **before the open** — that is the safe way to start. Ingesting posts and
+scoring signals needs no open market, and starting at 09:30 spends the first
+minutes of the session warming up instead of watching.
+
+```bash
+npm run readiness                     # must end: READY FOR REAL-DATA PAPER: YES
+npm run serve                         # dashboard on http://localhost:3737
+npm run paper -- --interval 120       # in a second terminal
+```
+
+At the open the cached pre-market prices are dropped, so the first trade of the
+day is priced on session data rather than on a pre-market mark that happened to
+be inside the cache window. A short delay after the close, the end-of-day report
+is printed automatically — you do not have to remember to run it.
+
+Stop with Ctrl-C; the current task finishes, then the day's report prints.
 
 ## Before the first real-credential run
 
