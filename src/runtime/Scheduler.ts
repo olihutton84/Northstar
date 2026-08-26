@@ -89,6 +89,8 @@ export class Scheduler {
   /** The shared lock. See the header: correctness over concurrency. */
   private busy: Promise<void> = Promise.resolve();
   private timers = new Set<NodeJS.Timeout>();
+  /** Resolve pending waits on stop, so a Ctrl-C is not held by a 3-minute sleep. */
+  private resolvers = new Map<NodeJS.Timeout, () => void>();
 
   constructor(opts: SchedulerOptions) {
     this.o = opts;
@@ -112,6 +114,15 @@ export class Scheduler {
     this.o.onEvent?.(event);
   }
 
+  /**
+   * Sleep until the next run, cancellably.
+   *
+   * The timer is deliberately NOT unref'd. `npm run paper` has nothing else
+   * holding the event loop open, so an unref'd timer would let the process
+   * exit the moment the first scan finished — a bot that quietly stops after
+   * one cycle. Ctrl-C is handled by `stop()`, which clears these timers and
+   * resolves the waits, so the process still exits promptly when asked.
+   */
   private wait(seconds: number): Promise<void> {
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
@@ -119,8 +130,7 @@ export class Scheduler {
         resolve();
       }, Math.max(1, seconds) * 1000);
       this.timers.add(timer);
-      // Never hold the process open for a timer alone; Ctrl-C should exit.
-      timer.unref?.();
+      this.resolvers.set(timer, resolve);
     });
   }
 
@@ -286,8 +296,7 @@ export class Scheduler {
       await this.xScanLoop();
     } finally {
       this.stopRequested = true;
-      for (const timer of this.timers) clearTimeout(timer);
-      this.timers.clear();
+      this.cancelWaits();
       // Let any task already past the lock finish its database work.
       await this.busy;
       this.running = false;
@@ -307,8 +316,16 @@ export class Scheduler {
 
   stop(): void {
     this.stopRequested = true;
-    for (const timer of this.timers) clearTimeout(timer);
+    this.cancelWaits();
+  }
+
+  private cancelWaits(): void {
+    for (const timer of this.timers) {
+      clearTimeout(timer);
+      this.resolvers.get(timer)?.();
+    }
     this.timers.clear();
+    this.resolvers.clear();
   }
 
   status(): SchedulerStatus {

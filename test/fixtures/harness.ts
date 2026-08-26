@@ -8,6 +8,7 @@
  */
 import { FixedClock, NullLogger } from '../../src/core/index.js';
 import type { NorthstarEnv } from '../../src/config/env.js';
+import type { OperationsConfig } from '../../src/config/operations.js';
 import { NorthstarApp } from '../../src/app.js';
 import type { TradingMode } from '../../src/domain/types.js';
 import { FixtureMarketDataProvider } from '../../src/providers/marketdata/FixtureMarketDataProvider.js';
@@ -68,6 +69,8 @@ export interface HarnessOptions {
   driftPct?: number;
   liveTradingEnabled?: boolean;
   seed?: boolean;
+  /** Override operational cadences and rate gates. */
+  operations?: Partial<OperationsConfig>;
 }
 
 export function createHarness(opts: HarnessOptions = {}): Harness {
@@ -98,6 +101,7 @@ export function createHarness(opts: HarnessOptions = {}): Harness {
     marketData,
     broker,
     databasePath: ':memory:',
+    ...(opts.operations ? { operations: opts.operations } : {}),
   });
 
   // Mirror the production write-through so `replay export` has history to

@@ -199,6 +199,7 @@ export class NorthstarApp {
       clock: this.clock,
       logger: this.logger,
       exitRules: this.spec.exitRules,
+      proposalTtlMinutes: this.ops.proposalTtlMinutes,
     });
 
     this.riskEngine = new RiskEngine(this.store, this.universe, this.ledger, this.clock, this.logger);
